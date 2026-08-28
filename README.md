@@ -2,12 +2,15 @@
 An independent, open-source election turnout and results auditing system that verifies published election data without accessing or controlling IEBC's critical infrastructure.
 
 **Background**
+
 I got access to a compromised file on IEBC, signed by then the chairman of IEBC William Chebukati. The pdf file contained information alleging the commission services numerous requests by various entities requiring register of voters for specific electoral areas. These requests are serviced upon payment of certain fees and in accordance with privacy laws requiring personally identifiable information to be kept confidential. That, what was being reported in the media was not data obtained through hacking of the BVR system but possibly from entities that may have legitimately obtained data from the commission through formal request and upon payment of requisite fees.
 
 **Problem Statement**
+
 IEBC has been involved in fraudulent activities regarding past election activities as indicated in the pdf file.
 
 **Proposed Solution**
+
 An integrated open and closed source election transparency verification system.
 
 **Objectives**
