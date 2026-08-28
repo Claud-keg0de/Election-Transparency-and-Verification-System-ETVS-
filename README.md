@@ -17,17 +17,20 @@ An integrated open and closed source election transparency verification system.
 4.	Policy
 
 **Election Data Model**
+
 **Polling Station**
 1.	Station ID
 2.	Station Name
 3.	Constituency
 4.	Registered Voters
 5.	Verified turnout
+
 **Election Result**
 1.	Result ID
 2.	Station ID
 3.	Candidate ID
 4.	Votes
+
 **Audit Record**
 1.	Audit ID
 2.	Station ID
