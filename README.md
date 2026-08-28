@@ -54,7 +54,6 @@ An integrated open and closed source election transparency verification system.
 
 **System Architecture Diagram**
 
-
 ****ELECTION DATA SOURCE****
 
 Published/Authorized Data (READ ONLY)
