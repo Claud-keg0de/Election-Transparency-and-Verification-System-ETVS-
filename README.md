@@ -54,38 +54,38 @@ An integrated open and closed source election transparency verification system.
 
 **System Architecture Diagram**
 
-**ELECTION DATA SOURCE**
+****ELECTION DATA SOURCE****
 
 Published/Authorized Data (READ ONLY)
 
-**DATA INGESTION API**
+****DATA INGESTION API****
 
-•	Validate Source
+Validate Source
 
-•	Verify Integrity
+Verify Integrity
 
-•	Sanitize Data
+Sanitize Data
 
-**AUDIT & VERIFICATION ENGINE**
+****AUDIT & VERIFICATION ENGINE****
 
-•	Turnout Checks
+Turnout Checks
 
-•	Results Checks
+Results Checks
 
-•	Aggregation Checks
+Aggregation Checks
 
-•	Anomaly Detection
+Anomaly Detection
 
-**AUDIT LOG**
+****AUDIT LOG****
 
-•	Tamper - Evident
+Tamper - Evident
 
-**PUBLIC DASHBOARD**
+****PUBLIC DASHBOARD****
 
-•	Verified Data
+Verified Data
 
-•	Alerts
+Alerts
 
-•	Statistics
+Statistics
 
 
