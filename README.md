@@ -61,14 +61,19 @@ Published/Authorized Data (READ ONLY)
 **DATA INGESTION API**
 
 •	Validate Source
+
 •	Verify Integrity
+
 •	Sanitize Data
 
 **AUDIT & VERIFICATION ENGINE**
 
 •	Turnout Checks
+
 •	Results Checks
+
 •	Aggregation Checks
+
 •	Anomaly Detection
 
 **AUDIT LOG**
@@ -78,7 +83,9 @@ Published/Authorized Data (READ ONLY)
 **PUBLIC DASHBOARD**
 
 •	Verified Data
+
 •	Alerts
+
 •	Statistics
 
 
