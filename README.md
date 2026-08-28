@@ -53,20 +53,30 @@ An integrated open and closed source election transparency verification system.
 7.	Detect impossible changes.
 
 **System Architecture Diagram**
+
 **ELECTION DATA SOURCE**
+
 Published/Authorized Data (READ ONLY)
+
 **DATA INGESTION API**
+
 •	Validate Source
 •	Verify Integrity
 •	Sanitize Data
+
 **AUDIT & VERIFICATION ENGINE**
+
 •	Turnout Checks
 •	Results Checks
 •	Aggregation Checks
 •	Anomaly Detection
+
 **AUDIT LOG**
+
 •	Tamper - Evident
+
 **PUBLIC DASHBOARD**
+
 •	Verified Data
 •	Alerts
 •	Statistics
