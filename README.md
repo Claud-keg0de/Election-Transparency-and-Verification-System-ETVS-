@@ -1,4 +1,4 @@
-# Election-Transparency-and-Verification-System-ETVS-
+# ETVS — Election Transparency and Verification System
 An independent, open-source election turnout and results auditing system that verifies published election data without accessing or controlling IEBC's critical infrastructure.
 
 **Background**
