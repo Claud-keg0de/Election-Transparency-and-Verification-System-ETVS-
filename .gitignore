@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+etvs_backup.dump
+etvs_backup.sql
