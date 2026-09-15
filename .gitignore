@@ -1,6 +1,46 @@
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
+*.pyo
+
+# Virtual environments
 .venv/
+venv/
+env/
+
+# Environment variables / secrets
 .env
-etvs_backup.dump
-etvs_backup.sql
+.env.*
+!.env.example
+
+# PostgreSQL / local configuration
+*.pgpass
+
+# Python tooling
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# IDE
+.vscode/settings.json
+.vscode/launch.json
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.temp
+
+# Local database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Backups
+*.bak
+*.backup
