@@ -108,6 +108,12 @@ def ensure_runtime_columns(cur) -> None:
 
 
 def scoped_station_ids(cur, election_id: str, scope: AuditScope) -> set[str]:
+    """Resolve the selected audit scope to polling stations.
+
+    PostgreSQL cannot infer the type of a NULL parameter in expressions such as
+    ``%s IS NULL``. Explicit TEXT casts keep both the unscoped (NULL) and scoped
+    cases valid when psycopg sends a Python None value.
+    """
     rows = cur.execute("""
         SELECT ps.polling_station_id
         FROM polling_stations ps
@@ -116,10 +122,10 @@ def scoped_station_ids(cur, election_id: str, scope: AuditScope) -> set[str]:
         JOIN constituencies c ON c.constituency_id=w.constituency_id
         JOIN counties co ON co.county_id=c.county_id
         WHERE ps.election_id=%s
-          AND (%s IS NULL OR co.county_id=%s)
-          AND (%s IS NULL OR c.constituency_id=%s)
-          AND (%s IS NULL OR w.ward_id=%s)
-          AND (%s IS NULL OR ps.polling_station_id=%s)
+          AND (%s::TEXT IS NULL OR co.county_id=%s::TEXT)
+          AND (%s::TEXT IS NULL OR c.constituency_id=%s::TEXT)
+          AND (%s::TEXT IS NULL OR w.ward_id=%s::TEXT)
+          AND (%s::TEXT IS NULL OR ps.polling_station_id=%s::TEXT)
     """, (election_id,
           scope.geography_id if scope.level=="COUNTY" else None, scope.geography_id if scope.level=="COUNTY" else None,
           scope.geography_id if scope.level=="CONSTITUENCY" else None, scope.geography_id if scope.level=="CONSTITUENCY" else None,
@@ -250,7 +256,7 @@ def station_findings(rows:list[dict],position_id:str|None)->list[Finding]:
         if pid == "POS-MCA" or position_id:
             ok=turn is not None and reg is not None and turn<=reg
             out.append(Finding("R001",PASSED if ok else FAILED,
-                f"{s}: voter turnout is {turn if turn is not None else 'missing'} and registered voters are {reg if reg is not None else 'missing'}." + ("" if ok else f" Difference: {(turn-reg) if turn is not None and reg is not None else 'unknown'}.") ,
+                f"{s}: voter turnout is {turn if turn is not None else 'missing'} and registered voters are {reg if reg is not None else 'missing'}." + ("" if ok else f" Difference: {(turn-reg) if turn is not None and reg is not None else 'unknown'}") ,
                 turn,reg,s,None,"POLLING_STATION",s,pid,"Voter Turnout","Registered Voters"))
         # R002-R004 are contest-specific. Spoilt ballots never enter the turnout identity.
         ok=turn is not None and cand is not None and cand<=turn
