@@ -19,6 +19,10 @@ ELECTION_ID = "KE-PRES-2027"
 
 REQUIRED_COLUMNS = {
     "regions": {"region_id", "region_name", "region_type"},
+    "special_area_contest_rules": {
+        "special_area_contest_rule_id", "special_voting_area_id", "position_id",
+        "reference_year", "eligibility_status", "source_document_id", "notes",
+    },
     "special_voting_areas": {
         "special_voting_area_id", "election_id", "area_code", "area_name",
         "voting_category", "country_name", "source_document_id", "notes"
@@ -73,6 +77,8 @@ REQUIRED_COLUMNS = {
 }
 
 REQUIRED_FKS = {
+    "fk_special_rule_area",
+    "fk_special_rule_position",
     "fk_candidate_position",
     "fk_candidate_party",
     "fk_independent_symbol_candidate",
@@ -197,6 +203,23 @@ def main() -> int:
                 ).fetchone()["n"]
                 if special_area_count < 13:
                     failures.append(f"Expected 12 diaspora country areas plus 1 prison area, found: {special_area_count}")
+
+                special_rule_stats = cur.execute("""
+                    SELECT COUNT(*) AS total_rules,
+                           COUNT(*) FILTER (WHERE reference_year=2022 AND eligibility_status='ALLOWED') AS allowed_rules
+                    FROM special_area_contest_rules sar
+                    JOIN special_voting_areas sva
+                      ON sva.special_voting_area_id=sar.special_voting_area_id
+                    WHERE sva.election_id=%s
+                """, (args.election_id,)).fetchone()
+                if special_rule_stats["total_rules"] != 78:
+                    failures.append(
+                        f"Expected 78 historical 2022 special-area contest rules, found: {special_rule_stats['total_rules']}"
+                    )
+                if special_rule_stats["allowed_rules"] != 13:
+                    failures.append(
+                        f"Expected 13 historical presidential-only special-area allowances, found: {special_rule_stats['allowed_rules']}"
+                    )
 
                 diaspora_station_stats = cur.execute("""
                     SELECT COUNT(*) AS station_count,
