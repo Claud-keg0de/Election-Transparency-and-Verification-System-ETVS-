@@ -126,3 +126,42 @@ if len(CONSTITUENCIES) != 290:
     raise RuntimeError(f"Expected 290 constituencies, got {len(CONSTITUENCIES)}")
 if len({n for n, _, _ in CONSTITUENCIES}) != 290:
     raise RuntimeError("Constituency numbers must be unique")
+
+
+# Historical 2022 IEBC diaspora polling-station reference data.
+# Source: IEBC "Register of Voters Residing Outside Kenya" / 21 June 2022
+# Kenya Gazette. These are historical reference records, not 2027 eligibility.
+DIASPORA_STATIONS_2022 = (
+    ("048291500000101", "Tanzania", "Kenya Embassy in Dar es Salaam", 496),
+    ("048291500000102", "Tanzania", "Kenya Embassy in Dar es Salaam", 496),
+    ("048291500002001", "Tanzania", "Kenya Consulate in Arusha", 410),
+    ("048291500100301", "Uganda", "Kenya High Commission in Kampala", 471),
+    ("048291500100302", "Uganda", "Kenya High Commission in Kampala", 470),
+    ("048291500100303", "Uganda", "Kenya High Commission in Kampala", 470),
+    ("048291500200401", "Rwanda", "Kenya Embassy in Kigali", 545),
+    ("048291500200402", "Rwanda", "Kenya Embassy in Kigali", 545),
+    ("048291500300501", "Burundi", "Kenya Embassy in Bujumbura", 201),
+    ("048291500400601", "South Africa", "Kenya Embassy in Pretoria", 479),
+    ("048291500400602", "South Africa", "Kenya Embassy in Pretoria", 479),
+    ("048291500500701", "South Sudan", "Kenya Embassy in Juba", 489),
+    ("048291500500702", "South Sudan", "Kenya Embassy in Juba", 488),
+    ("048291500600801", "Germany", "Kenya Embassy in Berlin", 314),
+    ("048291500700901", "United Kingdom", "Kenya High Commission in London", 399),
+    ("048291500700902", "United Kingdom", "Kenya High Commission in London", 399),
+    ("048291500801001", "Qatar", "Kenya Embassy in Doha", 479),
+    ("048291500801002", "Qatar", "Kenya Embassy in Doha", 479),
+    ("048291500801003", "Qatar", "Kenya Embassy in Doha", 479),
+    ("048291500901101", "United Arab Emirates", "Kenya Embassy in Abu Dhabi", 103),
+    ("048291500901201", "United Arab Emirates", "Kenya Consulate in Dubai", 642),
+    ("048291501001301", "Canada", "Kenya High Commission in Ottawa", 112),
+    ("048291501001401", "Canada", "Kenya Honorary Consulate in Toronto", 167),
+    ("048291501001501", "Canada", "Kenya Honorary Consulate in Vancouver", 87),
+    ("048291501101601", "United States of America", "Kenya Embassy in Washington DC", 314),
+    ("048291501101701", "United States of America", "Kenya Consulate in New York", 298),
+    ("048291501101801", "United States of America", "Kenya Consulate in Los Angeles", 132),
+)
+
+if len(DIASPORA_STATIONS_2022) != 27:
+    raise RuntimeError(f"Expected 27 2022 diaspora polling stations, got {len(DIASPORA_STATIONS_2022)}")
+if sum(voters for _, _, _, voters in DIASPORA_STATIONS_2022) != 10443:
+    raise RuntimeError("2022 diaspora station voters must total 10,443")
