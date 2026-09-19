@@ -21,6 +21,7 @@ Design rules:
     R018  Observed serials fall inside their allocated stock ranges.
     R019  Observed serials are not duplicated within an election/contest.
     R020  Ballot stock batches use the specification for their contest.
+    R021  Successive turnout observations respect the station-specific reporting interval.
 
 Important: turnout is deliberately NOT duplicated into six independent turnout
 figures. Every contest at a polling station references the same final turnout
@@ -92,6 +93,7 @@ def result_hash(election_id: str, station_id: str, candidate_id: str, version: i
 
 def ensure_runtime_columns(cur) -> None:
     """Keep old local databases executable while schema.sql/migrations catch up."""
+    cur.execute("ALTER TABLE polling_stations ADD COLUMN IF NOT EXISTS turnout_reporting_interval_minutes INTEGER NOT NULL DEFAULT 30")
     cur.execute("ALTER TABLE turnout_observations ADD COLUMN IF NOT EXISTS observed_at TIMESTAMPTZ")
     cur.execute("ALTER TABLE turnout_observations ADD COLUMN IF NOT EXISTS source_document_id BIGINT")
     cur.execute("ALTER TABLE ballot_accounting_observations ADD COLUMN IF NOT EXISTS observed_at TIMESTAMPTZ")
@@ -224,6 +226,41 @@ def result_changes(cur,election_id:str,station_ids:set[str],position_id:str|None
         out.append(Finding("R005",WARNING,
             f"{r['polling_station_id']} {r['position_id']} {r['candidate_id']}: result changed from {r['first_votes']} (version {r['first_version']}) to {r['latest_votes']} (version {r['latest_version']}); difference {diff:+d}.",
             r["latest_votes"],r["first_votes"],r["polling_station_id"],r["candidate_id"],"POLLING_STATION",r["polling_station_id"],r["position_id"],"Latest Result Votes","First Result Votes"))
+    return out
+
+
+def turnout_interval_findings(cur,election_id:str,station_ids:set[str])->list[Finding]:
+    """Enforce each polling station's configured minimum turnout interval."""
+    if not station_ids:
+        return []
+    stations=cur.execute("""
+        SELECT polling_station_id,turnout_reporting_interval_minutes
+        FROM polling_stations WHERE election_id=%s AND polling_station_id=ANY(%s)
+        ORDER BY polling_station_id
+    """,(election_id,list(station_ids))).fetchall()
+    observations=cur.execute("""
+        SELECT polling_station_id,observation_version,observed_at
+        FROM turnout_observations WHERE election_id=%s AND polling_station_id=ANY(%s)
+        ORDER BY polling_station_id,observed_at,observation_version
+    """,(election_id,list(station_ids))).fetchall()
+    by_station={}
+    for row in observations: by_station.setdefault(row["polling_station_id"],[]).append(row)
+    out=[]
+    for st in stations:
+        sid=st["polling_station_id"]; interval=st["turnout_reporting_interval_minutes"]; obs=by_station.get(sid,[])
+        if interval is None or interval < 1 or interval > 1440:
+            out.append(Finding("R021",FAILED,f"{sid}: turnout reporting interval is missing or invalid ({interval}).",interval,1,sid,None,"POLLING_STATION",sid,None,"Configured Interval (minutes)","Valid Interval (minutes)"))
+            continue
+        violations=[]
+        for previous,current in zip(obs,obs[1:]):
+            if previous["observed_at"] is None or current["observed_at"] is None:
+                violations.append("missing observation timestamp"); continue
+            elapsed=(current["observed_at"]-previous["observed_at"]).total_seconds()/60
+            if elapsed < interval: violations.append(f"{previous['observation_version']}→{current['observation_version']} elapsed {elapsed:g} minutes")
+        ok=not violations
+        out.append(Finding("R021",PASSED if ok else FAILED,
+            f"{sid}: successive turnout observations {'respect' if ok else 'violate'} the configured minimum interval of {interval} minutes." + ("" if ok else " Violations: "+", ".join(violations)+"."),
+            interval,interval,sid,None,"POLLING_STATION",sid,None,"Configured Interval (minutes)","Required Minimum Interval (minutes)"))
     return out
 
 
@@ -590,6 +627,7 @@ def audit_election(election_id:str,scope:AuditScope)->tuple[int,list[dict],bool,
             findings.extend(result_changes(cur,election_id,stations,scope.position_id,scope.candidate_id))
             findings.extend(integrity_findings(cur,election_id,stations,scope.position_id,scope.candidate_id))
             findings.extend(ballot_security_findings(cur,election_id,stations,scope.position_id))
+            findings.extend(turnout_interval_findings(cur,election_id,stations))
             findings.extend(aggregate_findings(cur,election_id,scope,stations,geos))
             write_findings(cur,run_id,election_id,findings,scope.position_id)
             cur.execute("UPDATE audit_runs SET completed_at=%s,status='COMPLETED',findings_count=%s WHERE audit_run_id=%s",(now_utc(),len(findings),run_id))
