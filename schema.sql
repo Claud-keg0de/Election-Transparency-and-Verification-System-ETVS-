@@ -540,7 +540,297 @@ CREATE INDEX idx_published_aggregate_lookup
     ON published_aggregate_totals(election_id, aggregation_level, geography_id);
 
 
+
 /*
+===============================================================================
+8. BALLOT SECURITY, SPECIFICATION AND STOCK CONTROL
+===============================================================================
+
+This layer models ballot-paper security independently from vote results.
+
+IMPORTANT
+---------
+1. ballot_specifications describe what the authoritative election-specific
+   specification requires.
+2. ballot_security_features describe individual expected security controls.
+3. ballot_stock_batches record controlled ballot stock by serial range.
+4. ballot_security_observations record what an auditor/source actually observed.
+5. No table links a ballot serial number to a voter.
+
+The audit engine compares specification/stock expectations with observations.
+It does not modify source observations.
+===============================================================================
+*/
+
+CREATE TABLE ballot_specifications (
+    ballot_specification_id TEXT PRIMARY KEY,
+
+    election_id TEXT NOT NULL,
+
+    position_id TEXT NOT NULL,
+
+    colour_name TEXT,
+    colour_code TEXT,
+
+    paper_description TEXT,
+    paper_size TEXT,
+    paper_finish TEXT,
+
+    counterfoil_required BOOLEAN NOT NULL DEFAULT TRUE,
+    official_mark_required BOOLEAN NOT NULL DEFAULT TRUE,
+
+    source_document_id BIGINT,
+
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT fk_ballot_specification_election
+        FOREIGN KEY (election_id)
+        REFERENCES elections(election_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT,
+
+    CONSTRAINT fk_ballot_specification_position
+        FOREIGN KEY (position_id)
+        REFERENCES positions(position_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT,
+
+    CONSTRAINT fk_ballot_specification_source
+        FOREIGN KEY (source_document_id)
+        REFERENCES source_documents(document_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT,
+
+    CONSTRAINT unique_ballot_specification
+        UNIQUE (election_id, position_id)
+);
+
+
+CREATE TABLE ballot_security_features (
+    security_feature_id BIGINT
+        GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+
+    ballot_specification_id TEXT NOT NULL,
+
+    feature_type TEXT NOT NULL,
+
+    feature_code TEXT,
+
+    description TEXT NOT NULL,
+
+    verification_method TEXT,
+
+    required BOOLEAN NOT NULL DEFAULT TRUE,
+
+    source_document_id BIGINT,
+
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT fk_ballot_security_feature_specification
+        FOREIGN KEY (ballot_specification_id)
+        REFERENCES ballot_specifications(ballot_specification_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT,
+
+    CONSTRAINT fk_ballot_security_feature_source
+        FOREIGN KEY (source_document_id)
+        REFERENCES source_documents(document_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT,
+
+    CONSTRAINT ballot_security_feature_type_check
+        CHECK (feature_type IN (
+            'WATERMARK',
+            'UV',
+            'ANTI_COPY',
+            'GUILLOCHE',
+            'MICROTEXT',
+            'SERIALIZATION',
+            'EMBOSSMENT',
+            'PERFORATION',
+            'OFFICIAL_MARK',
+            'PAPER'
+        ))
+);
+
+
+CREATE INDEX idx_ballot_security_features_spec
+    ON ballot_security_features(ballot_specification_id);
+
+
+CREATE TABLE ballot_stock_batches (
+    ballot_batch_id BIGINT
+        GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+
+    election_id TEXT NOT NULL,
+
+    position_id TEXT NOT NULL,
+
+    ballot_specification_id TEXT NOT NULL,
+
+    polling_station_id TEXT,
+
+    serial_start TEXT NOT NULL,
+
+    serial_end TEXT NOT NULL,
+
+    quantity INTEGER NOT NULL,
+
+    source_document_id BIGINT,
+
+    allocation_status TEXT NOT NULL DEFAULT 'ALLOCATED',
+
+    notes TEXT,
+
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT fk_ballot_batch_election
+        FOREIGN KEY (election_id)
+        REFERENCES elections(election_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT,
+
+    CONSTRAINT fk_ballot_batch_position
+        FOREIGN KEY (position_id)
+        REFERENCES positions(position_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT,
+
+    CONSTRAINT fk_ballot_batch_specification
+        FOREIGN KEY (ballot_specification_id)
+        REFERENCES ballot_specifications(ballot_specification_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT,
+
+    CONSTRAINT fk_ballot_batch_station_election
+        FOREIGN KEY (polling_station_id, election_id)
+        REFERENCES polling_stations(polling_station_id, election_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT,
+
+    CONSTRAINT fk_ballot_batch_source
+        FOREIGN KEY (source_document_id)
+        REFERENCES source_documents(document_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT,
+
+    CONSTRAINT ballot_batch_quantity_positive
+        CHECK (quantity > 0),
+
+    CONSTRAINT ballot_batch_serials_present
+        CHECK (length(trim(serial_start)) > 0 AND length(trim(serial_end)) > 0),
+
+    CONSTRAINT ballot_batch_status_check
+        CHECK (allocation_status IN (
+            'ALLOCATED',
+            'ISSUED',
+            'RETURNED',
+            'RECONCILED',
+            'CANCELLED'
+        ))
+);
+
+
+CREATE INDEX idx_ballot_stock_batches_lookup
+    ON ballot_stock_batches(election_id, position_id, polling_station_id);
+
+
+CREATE TABLE ballot_security_observations (
+    ballot_security_observation_id BIGINT
+        GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+
+    election_id TEXT NOT NULL,
+
+    polling_station_id TEXT NOT NULL,
+
+    ballot_specification_id TEXT NOT NULL,
+
+    ballot_batch_id BIGINT,
+
+    security_feature_id BIGINT,
+
+    serial_number TEXT,
+
+    observed_status TEXT NOT NULL,
+
+    observed_value TEXT,
+
+    verification_method TEXT,
+
+    source_document_id BIGINT,
+
+    source_reference TEXT,
+
+    observed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT fk_ballot_security_observation_election
+        FOREIGN KEY (election_id)
+        REFERENCES elections(election_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT,
+
+    CONSTRAINT fk_ballot_security_observation_station
+        FOREIGN KEY (polling_station_id, election_id)
+        REFERENCES polling_stations(polling_station_id, election_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT,
+
+    CONSTRAINT fk_ballot_security_observation_specification
+        FOREIGN KEY (ballot_specification_id)
+        REFERENCES ballot_specifications(ballot_specification_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT,
+
+    CONSTRAINT fk_ballot_security_observation_batch
+        FOREIGN KEY (ballot_batch_id)
+        REFERENCES ballot_stock_batches(ballot_batch_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT,
+
+    CONSTRAINT fk_ballot_security_observation_feature
+        FOREIGN KEY (security_feature_id)
+        REFERENCES ballot_security_features(security_feature_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT,
+
+    CONSTRAINT fk_ballot_security_observation_source
+        FOREIGN KEY (source_document_id)
+        REFERENCES source_documents(document_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT,
+
+    CONSTRAINT ballot_security_observation_status_check
+        CHECK (observed_status IN (
+            'PASS',
+            'FAIL',
+            'NOT_VERIFIED',
+            'NOT_PRESENT'
+        )),
+
+    CONSTRAINT ballot_security_observation_serial_check
+        CHECK (
+            security_feature_id IS NULL
+            OR serial_number IS NOT NULL
+            OR observed_status IN ('NOT_VERIFIED', 'NOT_PRESENT')
+        )
+);
+
+
+CREATE INDEX idx_ballot_security_observations_station
+    ON ballot_security_observations(election_id, polling_station_id);
+
+CREATE INDEX idx_ballot_security_observations_serial
+    ON ballot_security_observations(election_id, ballot_specification_id, serial_number);
+
+
+/*
+===============================================================================
+9. TURNOUT OBSERVATIONS
+===============================================================================
+*/
+
 ===============================================================================
 8. TURNOUT OBSERVATIONS
 ===============================================================================
