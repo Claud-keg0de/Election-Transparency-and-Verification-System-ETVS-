@@ -365,6 +365,10 @@ CREATE TABLE polling_stations (
 
     registered_voters INTEGER NOT NULL,
 
+    -- Minimum elapsed time, in minutes, required between successive turnout
+    -- observations for this polling station. The value is station-specific.
+    turnout_reporting_interval_minutes INTEGER NOT NULL DEFAULT 30,
+
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
     CONSTRAINT fk_polling_station_election
@@ -381,6 +385,9 @@ CREATE TABLE polling_stations (
 
     CONSTRAINT polling_station_registered_voters_non_negative
         CHECK (registered_voters >= 0),
+
+    CONSTRAINT polling_station_turnout_interval_positive
+        CHECK (turnout_reporting_interval_minutes BETWEEN 1 AND 1440),
 
     CONSTRAINT unique_polling_station_code_per_election
         UNIQUE (election_id, polling_station_code),
@@ -562,6 +569,31 @@ Example:
     Polling Station: PS001
     Turnout: 800
 
+===============================================================================
+*/
+
+CREATE INDEX idx_polling_station_turnout_interval
+    ON polling_stations(election_id, polling_station_id, turnout_reporting_interval_minutes);
+
+
+/*
+===============================================================================
+8. TURNOUT OBSERVATIONS
+===============================================================================
+
+INDEPENDENT SOURCE OBSERVATION
+
+Turnout is one station-wide voter count shared by all six contests.
+
+TURNOUT REPORTING INTERVAL
+--------------------------
+Each polling station has its own turnout_reporting_interval_minutes setting.
+The interval is the minimum elapsed time permitted between successive turnout
+observations for that station. The audit engine enforces this rule as R014.
+
+The interval belongs to the polling-station configuration, not to an individual
+contest, because turnout represents voters who cast ballots at the station and
+must not be counted six times.
 ===============================================================================
 */
 
