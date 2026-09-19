@@ -47,15 +47,16 @@ class StationSeed:
     centre_id: str
     registered: int
     turnout: int
+    turnout_interval_minutes: int
 
 
 STATIONS = (
-    StationSeed("PS001", "PS-001", "RC001", 1000, 700),
-    StationSeed("PS002", "PS-002", "RC002", 800, 500),
-    StationSeed("PS003", "PS-003", "RC003", 950, 1000),  # R001 anomaly
-    StationSeed("PS004", "PS-004", "RC004", 1200, 900),
-    StationSeed("PS005", "PS-005", "RC005", 600, 450),
-    StationSeed("PS006", "PS-006", "RC006", 700, 650),
+    StationSeed("PS001", "PS-001", "RC001", 1000, 700, 15),
+    StationSeed("PS002", "PS-002", "RC002", 800, 500, 30),
+    StationSeed("PS003", "PS-003", "RC003", 950, 1000, 60),  # R001 anomaly
+    StationSeed("PS004", "PS-004", "RC004", 1200, 900, 20),
+    StationSeed("PS005", "PS-005", "RC005", 600, 450, 45),
+    StationSeed("PS006", "PS-006", "RC006", 700, 650, 120),
 )
 
 # Each tuple is (valid, rejected, spoilt) for every contest at that station.
@@ -122,6 +123,27 @@ def ensure_schema(cur) -> None:
     cur.execute("ALTER TABLE result_submissions ADD COLUMN IF NOT EXISTS observed_at TIMESTAMPTZ")
     cur.execute("ALTER TABLE positions ADD COLUMN IF NOT EXISTS ballot_code TEXT")
     cur.execute("ALTER TABLE positions ADD COLUMN IF NOT EXISTS observation_sequence INTEGER")
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS turnout_reporting_intervals (
+            turnout_interval_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            election_id TEXT NOT NULL REFERENCES elections(election_id),
+            polling_station_id TEXT NOT NULL REFERENCES polling_stations(polling_station_id),
+            interval_minutes INTEGER NOT NULL CHECK (interval_minutes > 0),
+            effective_from TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            effective_to TIMESTAMPTZ,
+            reporting_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE (election_id, polling_station_id, effective_from),
+            CHECK (effective_to IS NULL OR effective_to > effective_from)
+        )
+    """)
+    cur.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_turnout_interval_current
+        ON turnout_reporting_intervals(election_id, polling_station_id)
+        WHERE effective_to IS NULL
+    """)
+    cur.execute("ALTER TABLE turnout_observations ADD COLUMN IF NOT EXISTS interval_configuration_id BIGINT")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_turnout_interval_configuration ON turnout_observations(interval_configuration_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_registered_latest ON registered_voter_observations(election_id,polling_station_id,observation_version DESC)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_ballot_latest_position ON ballot_accounting_observations(election_id,polling_station_id,position_id,observation_version DESC)")
     cur.execute("""
@@ -219,6 +241,7 @@ def reset_sample(cur) -> None:
         "DELETE FROM ballot_accounting_observations WHERE election_id=%s",
         "DELETE FROM registered_voter_observations WHERE election_id=%s",
         "DELETE FROM turnout_observations WHERE election_id=%s",
+        "DELETE FROM turnout_reporting_intervals WHERE election_id=%s",
         "DELETE FROM polling_stations WHERE election_id=%s",
         "DELETE FROM candidates WHERE election_id=%s",
         "DELETE FROM elections WHERE election_id=%s",
@@ -255,6 +278,24 @@ def seed_master_data(cur) -> None:
             """,(cid,ELECTION_ID,name,pname))
 
 
+def seed_turnout_intervals(cur) -> None:
+    """Seed one independently configurable reporting interval for every station."""
+    base=datetime(2027,8,10,8,0,tzinfo=timezone.utc)
+    for i,s in enumerate(STATIONS):
+        effective_from=base+timedelta(minutes=i)
+        cur.execute("""
+            INSERT INTO turnout_reporting_intervals(
+                election_id,polling_station_id,interval_minutes,effective_from,
+                effective_to,reporting_enabled
+            )
+            VALUES(%s,%s,%s,%s,NULL,TRUE)
+            ON CONFLICT(election_id,polling_station_id,effective_from) DO UPDATE SET
+                interval_minutes=EXCLUDED.interval_minutes,
+                effective_to=NULL,
+                reporting_enabled=EXCLUDED.reporting_enabled
+        """,(ELECTION_ID,s.station_id,s.turnout_interval_minutes,effective_from))
+
+
 def seed_observations(cur,source_document_id:int) -> None:
     """Create registered, shared turnout, and six contest-specific ballot streams."""
     base=datetime(2027,8,10,8,0,tzinfo=timezone.utc)
@@ -266,17 +307,25 @@ def seed_observations(cur,source_document_id:int) -> None:
             ON CONFLICT(election_id,polling_station_id,observation_version) DO UPDATE SET registered_voters=EXCLUDED.registered_voters,
             observed_at=EXCLUDED.observed_at,source_document_id=EXCLUDED.source_document_id,source_reference=EXCLUDED.source_reference
         """,(ELECTION_ID,s.station_id,s.registered,registered_at,source_document_id,f"SEED-REGISTERED-{s.station_id}-V1"))
+        interval_id=cur.execute("""
+            SELECT turnout_interval_id FROM turnout_reporting_intervals
+            WHERE election_id=%s AND polling_station_id=%s AND effective_from <= %s
+              AND (effective_to IS NULL OR effective_to > %s)
+            ORDER BY effective_from DESC LIMIT 1
+        """,(ELECTION_ID,s.station_id,registered_at,registered_at)).fetchone()["turnout_interval_id"]
         # Turnout is one voter count for the station, not six separate counts.
+        # Store the configuration used at entry time so the audit trail preserves
+        # the exact reporting cadence that applied to each observation.
         t1=registered_at+timedelta(hours=3);t2=registered_at+timedelta(hours=7)
         initial=max(0,s.turnout-(5 if s.station_id=="PS005" else 0))
         for version,turnout,when in ((1,initial,t1),(2,s.turnout,t2)):
             ref=digest("TURNOUT",ELECTION_ID,s.station_id,version,turnout)
             cur.execute("""
-                INSERT INTO turnout_observations(election_id,polling_station_id,observation_version,voters_turnout,source_document_id,source_reference,observed_at)
-                VALUES(%s,%s,%s,%s,%s,%s,%s)
+                INSERT INTO turnout_observations(election_id,polling_station_id,observation_version,interval_configuration_id,voters_turnout,source_document_id,source_reference,observed_at)
+                VALUES(%s,%s,%s,%s,%s,%s,%s,%s)
                 ON CONFLICT(election_id,polling_station_id,observation_version) DO UPDATE SET voters_turnout=EXCLUDED.voters_turnout,
-                source_document_id=EXCLUDED.source_document_id,source_reference=EXCLUDED.source_reference,observed_at=EXCLUDED.observed_at
-            """,(ELECTION_ID,s.station_id,version,turnout,source_document_id,ref,when))
+                interval_configuration_id=EXCLUDED.interval_configuration_id,source_document_id=EXCLUDED.source_document_id,source_reference=EXCLUDED.source_reference,observed_at=EXCLUDED.observed_at
+            """,(ELECTION_ID,s.station_id,version,interval_id,turnout,source_document_id,ref,when))
         turnout_id=cur.execute("SELECT turnout_observation_id FROM turnout_observations WHERE election_id=%s AND polling_station_id=%s AND observation_version=2",(ELECTION_ID,s.station_id)).fetchone()["turnout_observation_id"]
         valid,rejected,spoilt=BASE_ACCOUNTING[s.station_id]
         for pos_index,(pid,*_) in enumerate(POSITIONS):
@@ -368,23 +417,24 @@ def seed_published_aggregates(cur,source_document_id:int)->None:
 
 def check(cur)->None:
     print("\nETVS SEED VERIFICATION\n"+"="*82)
-    tables=("positions","elections","counties","constituencies","wards","registration_centres","polling_stations","registered_voter_observations","turnout_observations","ballot_accounting_observations","candidates","result_submissions","published_aggregate_totals","audit_runs","audit_findings")
+    tables=("positions","elections","counties","constituencies","wards","registration_centres","polling_stations","turnout_reporting_intervals","registered_voter_observations","turnout_observations","ballot_accounting_observations","candidates","result_submissions","published_aggregate_totals","audit_runs","audit_findings")
     for table in tables:
         try: print(f"{table:38}{cur.execute(f'SELECT COUNT(*) AS n FROM {table}').fetchone()['n']:>7}")
         except psycopg.errors.UndefinedTable: print(f"{table:38} MISSING")
     rows=cur.execute("""
-        SELECT ps.polling_station_id,rv.registered_voters,t.voters_turnout,
+        SELECT ps.polling_station_id,ps.registered_voters,ri.interval_minutes turnout_interval_minutes,ri.reporting_enabled,rv.registered_voters,t.voters_turnout,
                COUNT(DISTINCT b.position_id) contests,MIN(b.valid_votes+b.rejected_votes) min_accounted,MAX(b.valid_votes+b.rejected_votes) max_accounted,
                COUNT(DISTINCT rs.position_id) result_positions
         FROM polling_stations ps
+        LEFT JOIN turnout_reporting_intervals ri ON ri.election_id=ps.election_id AND ri.polling_station_id=ps.polling_station_id AND ri.effective_to IS NULL
         LEFT JOIN registered_voter_observations rv ON rv.election_id=ps.election_id AND rv.polling_station_id=ps.polling_station_id AND rv.observation_version=(SELECT MAX(x.observation_version) FROM registered_voter_observations x WHERE x.election_id=ps.election_id AND x.polling_station_id=ps.polling_station_id)
         LEFT JOIN turnout_observations t ON t.election_id=ps.election_id AND t.polling_station_id=ps.polling_station_id AND t.observation_version=(SELECT MAX(x.observation_version) FROM turnout_observations x WHERE x.election_id=ps.election_id AND x.polling_station_id=ps.polling_station_id)
         LEFT JOIN ballot_accounting_observations b ON b.election_id=ps.election_id AND b.polling_station_id=ps.polling_station_id AND b.observation_version=(SELECT MAX(x.observation_version) FROM ballot_accounting_observations x WHERE x.election_id=ps.election_id AND x.polling_station_id=ps.polling_station_id AND x.position_id=b.position_id)
         LEFT JOIN result_submissions rs ON rs.election_id=ps.election_id AND rs.polling_station_id=ps.polling_station_id
-        WHERE ps.election_id=%s GROUP BY ps.polling_station_id,rv.registered_voters,t.voters_turnout ORDER BY ps.polling_station_id
+        WHERE ps.election_id=%s GROUP BY ps.polling_station_id,ps.registered_voters,ri.interval_minutes,ri.reporting_enabled,rv.registered_voters,t.voters_turnout ORDER BY ps.polling_station_id
     """,(ELECTION_ID,)).fetchall()
     print("\nSTATION COVERAGE")
-    for r in rows:print(f"{r['polling_station_id']}: registered={r['registered_voters']} turnout={r['voters_turnout']} contests={r['contests']} result_positions={r['result_positions']} accounting={r['min_accounted']}..{r['max_accounted']}")
+    for r in rows:print(f"{r['polling_station_id']}: registered={r['registered_voters']} turnout={r['voters_turnout']} interval={r['turnout_interval_minutes']}min enabled={r['reporting_enabled']} contests={r['contests']} result_positions={r['result_positions']} accounting={r['min_accounted']}..{r['max_accounted']}")
 
 
 def main()->int:
@@ -394,7 +444,7 @@ def main()->int:
             with conn.cursor() as cur:
                 ensure_schema(cur)
                 if a.reset:reset_sample(cur)
-                seed_positions(cur);source_doc,published_doc=seed_sources(cur);seed_master_data(cur);seed_observations(cur,source_doc);seed_results(cur,source_doc);seed_published_aggregates(cur,published_doc);ensure_reporting_views(cur);check(cur)
+                seed_positions(cur);source_doc,published_doc=seed_sources(cur);seed_master_data(cur);seed_turnout_intervals(cur);seed_observations(cur,source_doc);seed_results(cur,source_doc);seed_published_aggregates(cur,published_doc);ensure_reporting_views(cur);check(cur)
             conn.commit()
         print("\nSEED SUCCESS: PostgreSQL data committed successfully.");return 0
     except Exception as exc:print(f"\nSEED FAILED: {exc}");return 1
