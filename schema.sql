@@ -594,6 +594,8 @@ CREATE TABLE polling_stations (
 
     special_voting_area_id TEXT,
 
+    special_voting_slot_id BIGINT,
+
     location_type TEXT NOT NULL DEFAULT 'NORMAL',
 
     polling_station_code TEXT NOT NULL,
@@ -946,6 +948,132 @@ CREATE TABLE independent_candidate_symbols (
         CHECK (candidate_id IS NOT NULL)
 );
 
+
+/*
+===============================================================================
+8A. CANDIDATE ELECTORAL-AREA ASSIGNMENTS
+===============================================================================
+
+A candidate is contest-specific and electoral-area-specific. The Elections Act
+and Elections (General) Regulations define an electoral area as a constituency,
+county or ward; the presidential contest is national. ETVS therefore records
+which area a candidate is nominated for instead of treating a candidate as
+valid for every polling station in an election.
+
+For party candidates, the same party may have one candidate slot per applicable
+contest and electoral area. Independent candidates are also tied to their
+specific contest and area, with no party slot.
+===============================================================================
+*/
+
+CREATE TABLE candidate_electoral_areas (
+    candidate_electoral_area_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+
+    candidate_id TEXT NOT NULL,
+    election_id TEXT NOT NULL,
+    position_id TEXT NOT NULL,
+    electoral_area_type TEXT NOT NULL,
+    electoral_area_id TEXT NOT NULL,
+    candidate_type TEXT NOT NULL,
+    party_id TEXT,
+
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT fk_candidate_area_candidate
+        FOREIGN KEY (candidate_id, election_id)
+        REFERENCES candidates(candidate_id, election_id)
+        ON UPDATE CASCADE ON DELETE RESTRICT,
+
+    CONSTRAINT fk_candidate_area_position
+        FOREIGN KEY (position_id)
+        REFERENCES positions(position_id)
+        ON UPDATE CASCADE ON DELETE RESTRICT,
+
+    CONSTRAINT fk_candidate_area_party
+        FOREIGN KEY (party_id)
+        REFERENCES political_parties(party_id)
+        ON UPDATE CASCADE ON DELETE RESTRICT,
+
+    CONSTRAINT candidate_area_type_check
+        CHECK (electoral_area_type IN ('NATIONAL','COUNTY','CONSTITUENCY','WARD')),
+
+    CONSTRAINT candidate_area_candidate_type_check
+        CHECK (candidate_type IN ('PARTY','INDEPENDENT')),
+
+    CONSTRAINT candidate_area_party_check
+        CHECK ((candidate_type='PARTY' AND party_id IS NOT NULL)
+            OR (candidate_type='INDEPENDENT' AND party_id IS NULL)),
+
+    CONSTRAINT unique_candidate_area_assignment
+        UNIQUE (candidate_id, election_id),
+
+    CONSTRAINT unique_party_candidate_slot
+        UNIQUE NULLS NOT DISTINCT (
+            election_id, position_id, electoral_area_type, electoral_area_id, party_id
+        )
+);
+
+CREATE INDEX idx_candidate_area_lookup
+    ON candidate_electoral_areas(election_id, position_id, electoral_area_type, electoral_area_id);
+
+CREATE OR REPLACE FUNCTION validate_candidate_electoral_area()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $
+DECLARE
+    expected_geography TEXT;
+    candidate_position TEXT;
+    candidate_party TEXT;
+    candidate_kind TEXT;
+BEGIN
+    SELECT p.geography_level, c.position_id, c.party_id, c.candidate_type
+      INTO expected_geography, candidate_position, candidate_party, candidate_kind
+      FROM candidates c
+      JOIN positions p ON p.position_id=c.position_id
+     WHERE c.candidate_id=NEW.candidate_id
+       AND c.election_id=NEW.election_id;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Candidate % does not belong to election %', NEW.candidate_id, NEW.election_id;
+    END IF;
+
+    IF NEW.position_id <> candidate_position THEN
+        RAISE EXCEPTION 'Candidate % is assigned to position %, not %', NEW.candidate_id, candidate_position, NEW.position_id;
+    END IF;
+
+    IF NEW.electoral_area_type <> expected_geography THEN
+        RAISE EXCEPTION 'Position % requires % electoral area, not %', NEW.position_id, expected_geography, NEW.electoral_area_type;
+    END IF;
+
+    IF NEW.candidate_type <> candidate_kind OR NEW.party_id IS DISTINCT FROM candidate_party THEN
+        RAISE EXCEPTION 'Candidate affiliation mismatch for %', NEW.candidate_id;
+    END IF;
+
+    IF NEW.electoral_area_type='NATIONAL' THEN
+        IF NEW.electoral_area_id <> 'NATIONAL' THEN
+            RAISE EXCEPTION 'National contests must use electoral area NATIONAL';
+        END IF;
+    ELSIF NEW.electoral_area_type='COUNTY' THEN
+        IF NOT EXISTS (SELECT 1 FROM counties WHERE county_id=NEW.electoral_area_id) THEN
+            RAISE EXCEPTION 'Unknown county electoral area %', NEW.electoral_area_id;
+        END IF;
+    ELSIF NEW.electoral_area_type='CONSTITUENCY' THEN
+        IF NOT EXISTS (SELECT 1 FROM constituencies WHERE constituency_id=NEW.electoral_area_id) THEN
+            RAISE EXCEPTION 'Unknown constituency electoral area %', NEW.electoral_area_id;
+        END IF;
+    ELSIF NEW.electoral_area_type='WARD' THEN
+        IF NOT EXISTS (SELECT 1 FROM wards WHERE ward_id=NEW.electoral_area_id) THEN
+            RAISE EXCEPTION 'Unknown ward electoral area %', NEW.electoral_area_id;
+        END IF;
+    END IF;
+
+    RETURN NEW;
+END;
+$;
+
+CREATE TRIGGER trg_validate_candidate_electoral_area
+BEFORE INSERT OR UPDATE ON candidate_electoral_areas
+FOR EACH ROW EXECUTE FUNCTION validate_candidate_electoral_area();
 
 CREATE TABLE source_submissions (
     source_submission_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -1313,6 +1441,71 @@ CREATE TABLE result_submissions (
             result_version
         )
 );
+
+
+/* Enforce that a result candidate is valid for the polling station's contest area. */
+CREATE OR REPLACE FUNCTION validate_result_candidate_electoral_area()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $
+DECLARE
+    station_area_type TEXT;
+    station_area_id TEXT;
+    candidate_area_type TEXT;
+    candidate_area_id TEXT;
+BEGIN
+    SELECT p.geography_level,
+           CASE p.geography_level
+             WHEN 'NATIONAL' THEN 'NATIONAL'
+             WHEN 'COUNTY' THEN co.county_id
+             WHEN 'CONSTITUENCY' THEN co2.constituency_id
+             WHEN 'WARD' THEN w.ward_id
+           END
+      INTO station_area_type, station_area_id
+      FROM polling_stations ps
+      LEFT JOIN registration_centres rc ON rc.registration_centre_id=ps.registration_centre_id
+      LEFT JOIN wards w ON w.ward_id=rc.ward_id
+      LEFT JOIN constituencies co2 ON co2.constituency_id=w.constituency_id
+      LEFT JOIN counties co ON co.county_id=co2.county_id
+      JOIN positions p ON p.position_id=NEW.position_id
+     WHERE ps.polling_station_id=NEW.polling_station_id
+       AND ps.election_id=NEW.election_id;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Cannot resolve polling station % and position %', NEW.polling_station_id, NEW.position_id;
+    END IF;
+
+    IF station_area_type='NATIONAL' AND EXISTS (
+        SELECT 1 FROM polling_stations WHERE polling_station_id=NEW.polling_station_id AND location_type='SPECIAL'
+    ) THEN
+        -- Special-area eligibility is separately modeled and remains configurable.
+        RETURN NEW;
+    END IF;
+
+    SELECT cea.electoral_area_type, cea.electoral_area_id
+      INTO candidate_area_type, candidate_area_id
+      FROM candidate_electoral_areas cea
+     WHERE cea.candidate_id=NEW.candidate_id
+       AND cea.election_id=NEW.election_id
+       AND cea.position_id=NEW.position_id;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Candidate % has no electoral-area assignment for position %', NEW.candidate_id, NEW.position_id;
+    END IF;
+
+    IF candidate_area_type <> station_area_type OR candidate_area_id <> station_area_id THEN
+        RAISE EXCEPTION 'Candidate % is not nominated for polling station % area (%:%); candidate area is (%:%)',
+            NEW.candidate_id, NEW.polling_station_id, station_area_type, station_area_id,
+            candidate_area_type, candidate_area_id;
+    END IF;
+
+    RETURN NEW;
+END;
+$;
+
+CREATE TRIGGER trg_validate_result_candidate_electoral_area
+BEFORE INSERT OR UPDATE ON result_submissions
+FOR EACH ROW EXECUTE FUNCTION validate_result_candidate_electoral_area();
 
 
 /*
