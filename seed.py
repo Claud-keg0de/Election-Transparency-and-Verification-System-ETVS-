@@ -316,7 +316,8 @@ def seed_observations(cur,source_document_id:int) -> None:
         # Turnout is one voter count for the station, not six separate counts.
         # Store the configuration used at entry time so the audit trail preserves
         # the exact reporting cadence that applied to each observation.
-        t1=registered_at+timedelta(hours=3);t2=registered_at+timedelta(hours=7)
+        t1=registered_at+timedelta(minutes=s.turnout_interval_minutes)
+        t2=t1+timedelta(minutes=s.turnout_interval_minutes)
         initial=max(0,s.turnout-(5 if s.station_id=="PS005" else 0))
         for version,turnout,when in ((1,initial,t1),(2,s.turnout,t2)):
             ref=digest("TURNOUT",ELECTION_ID,s.station_id,version,turnout)
