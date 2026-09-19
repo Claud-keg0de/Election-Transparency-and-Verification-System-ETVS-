@@ -95,6 +95,7 @@ def digest(*parts: object) -> str:
 
 def ensure_schema(cur) -> None:
     """Additive compatibility layer for databases created before this redesign."""
+    cur.execute("ALTER TABLE polling_stations ADD COLUMN IF NOT EXISTS turnout_reporting_interval_minutes INTEGER NOT NULL DEFAULT 30")
     cur.execute("""
         CREATE TABLE IF NOT EXISTS registered_voter_observations (
             registered_voter_observation_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -369,6 +370,18 @@ def seed_published_aggregates(cur,source_document_id:int)->None:
 
 
 def check(cur)->None:
+    """Verify seeded station configuration, including per-station turnout intervals."""
+    interval_rows=cur.execute("""
+        SELECT polling_station_id,turnout_reporting_interval_minutes
+        FROM polling_stations WHERE election_id=%s ORDER BY polling_station_id
+    """,(ELECTION_ID,)).fetchall()
+    expected={s.station_id:s.turnout_interval_minutes for s in STATIONS}
+    actual={r["polling_station_id"]:r["turnout_reporting_interval_minutes"] for r in interval_rows}
+    if actual!=expected:
+        raise AssertionError(f"Turnout interval configuration mismatch: expected {expected}, got {actual}")
+    if any(v<1 or v>1440 for v in actual.values()):
+        raise AssertionError("Turnout reporting intervals must be between 1 and 1440 minutes.")
+    print("Turnout reporting intervals: PASS")
     print("\nETVS SEED VERIFICATION\n"+"="*82)
     tables=("positions","elections","counties","constituencies","wards","registration_centres","polling_stations","registered_voter_observations","turnout_observations","ballot_accounting_observations","candidates","result_submissions","published_aggregate_totals","audit_runs","audit_findings")
     for table in tables:
