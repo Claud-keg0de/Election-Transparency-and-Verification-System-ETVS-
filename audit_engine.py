@@ -14,6 +14,13 @@ Design rules:
     R011  Registered-voter observations precede turnout observations.
     R012  Turnout observation precedes contest ballot accounting.
     R013  Contest ballot accounting precedes candidate result publication.
+    R014  Every contest has an election-specific ballot specification.
+    R015  Observed ballot colour matches the stored specification.
+    R016  Ballot stock serial ranges have positive, internally consistent quantities.
+    R017  Required security features have supporting observations.
+    R018  Observed serials fall inside their allocated stock ranges.
+    R019  Observed serials are not duplicated within an election/contest.
+    R020  Ballot stock batches use the specification for their contest.
 
 Important: turnout is deliberately NOT duplicated into six independent turnout
 figures. Every contest at a polling station references the same final turnout
@@ -446,6 +453,121 @@ def verify_chain_cursor(cur)->tuple[bool,int|None]:
     return True,None
 
 
+def ballot_security_findings(cur,election_id:str,station_ids:set[str],position_id:str|None)->list[Finding]:
+    """Audit ballot specifications, controlled stock, colours and security observations."""
+    if not station_ids:
+        return []
+    rows=cur.execute("""
+        SELECT ps.polling_station_id,p.position_id,p.position_name,
+               bs.ballot_specification_id,bs.colour_name,bs.colour_code,
+               b.ballot_batch_id,b.serial_start,b.serial_end,b.quantity,b.position_id batch_position
+        FROM polling_stations ps
+        CROSS JOIN positions p
+        LEFT JOIN ballot_specifications bs
+          ON bs.election_id=ps.election_id AND bs.position_id=p.position_id
+        LEFT JOIN ballot_stock_batches b
+          ON b.election_id=ps.election_id
+         AND b.position_id=p.position_id
+         AND b.polling_station_id=ps.polling_station_id
+        WHERE ps.election_id=%s AND ps.polling_station_id=ANY(%s)
+          AND (%s::TEXT IS NULL OR p.position_id=%s::TEXT)
+        ORDER BY ps.polling_station_id,p.observation_sequence
+    """,(election_id,list(station_ids),position_id,position_id)).fetchall()
+    out=[]
+    for r in rows:
+        s,pid=r["polling_station_id"],r["position_id"]
+        spec_ok=r["ballot_specification_id"] is not None
+        out.append(Finding("R014",PASSED if spec_ok else FAILED,
+            f"{s} {pid}: ballot specification is {'present' if spec_ok else 'missing'}.",
+            1 if spec_ok else 0,1,s,None,"POLLING_STATION",s,pid,"Specification Present","Required"))
+
+        if not spec_ok:
+            continue
+
+        paper=cur.execute("""
+            SELECT observed_value,observed_status
+            FROM ballot_security_observations
+            WHERE election_id=%s AND polling_station_id=%s
+              AND ballot_specification_id=%s
+              AND security_feature_id IN (
+                  SELECT security_feature_id FROM ballot_security_features
+                  WHERE ballot_specification_id=%s AND feature_type='PAPER'
+              )
+            ORDER BY ballot_security_observation_id DESC LIMIT 1
+        """,(election_id,s,r["ballot_specification_id"],r["ballot_specification_id"])).fetchone()
+        expected=r["colour_name"]
+        observed=paper["observed_value"] if paper else None
+        colour_ok=paper is not None and paper["observed_status"]=="PASS" and observed==expected
+        out.append(Finding("R015",PASSED if colour_ok else FAILED,
+            f"{s} {pid}: ballot colour observed as {observed if observed else 'missing'}; expected {expected}.",
+            1 if colour_ok else 0,1,s,None,"POLLING_STATION",s,pid,"Colour Match","Required"))
+
+        batch_ok=False
+        if r["ballot_batch_id"] is not None:
+            try:
+                start,end,qty=int(r["serial_start"]),int(r["serial_end"]),int(r["quantity"])
+                batch_ok=end>=start and qty==(end-start+1)
+            except (TypeError,ValueError):
+                batch_ok=False
+        out.append(Finding("R016",PASSED if batch_ok else FAILED,
+            f"{s} {pid}: allocated serial range {r['serial_start']}-{r['serial_end']} has quantity {r['quantity']}; range quantity must match.",
+            r["quantity"],(int(r["serial_end"])-int(r["serial_start"])+1) if r["serial_start"] and r["serial_end"] and str(r["serial_start"]).isdigit() and str(r["serial_end"]).isdigit() else None,
+            s,None,"POLLING_STATION",s,pid,"Allocated Quantity","Serial Range Quantity"))
+
+        required=cur.execute("""
+            SELECT COUNT(*)::INTEGER n FROM ballot_security_features
+            WHERE ballot_specification_id=%s AND required=TRUE
+        """,(r["ballot_specification_id"],)).fetchone()["n"]
+        passed=cur.execute("""
+            SELECT COUNT(*)::INTEGER n FROM ballot_security_observations o
+            JOIN ballot_security_features f ON f.security_feature_id=o.security_feature_id
+            WHERE o.election_id=%s AND o.polling_station_id=%s
+              AND o.ballot_specification_id=%s AND f.required=TRUE
+              AND o.observed_status='PASS'
+        """,(election_id,s,r["ballot_specification_id"])).fetchone()["n"]
+        feature_ok=required>0 and passed==required
+        out.append(Finding("R017",PASSED if feature_ok else FAILED,
+            f"{s} {pid}: {passed} of {required} required ballot-security features have PASS observations.",
+            passed,required,s,None,"POLLING_STATION",s,pid,"Verified Security Features","Required Security Features"))
+
+        serials=cur.execute("""
+            SELECT o.serial_number,b.serial_start,b.serial_end
+            FROM ballot_security_observations o
+            JOIN ballot_security_features f ON f.security_feature_id=o.security_feature_id
+            LEFT JOIN ballot_stock_batches b ON b.ballot_batch_id=o.ballot_batch_id
+            WHERE o.election_id=%s AND o.polling_station_id=%s
+              AND o.ballot_specification_id=%s AND f.feature_type='SERIALIZATION'
+              AND o.serial_number IS NOT NULL
+        """,(election_id,s,r["ballot_specification_id"])).fetchall()
+        serial_ok=True
+        for x in serials:
+            try: serial_ok &= int(x["serial_start"]) <= int(x["serial_number"]) <= int(x["serial_end"])
+            except (TypeError,ValueError): serial_ok=False
+        out.append(Finding("R018",PASSED if serial_ok and bool(serials) else FAILED,
+            f"{s} {pid}: observed serialization is {'within' if serial_ok and serials else 'not within'} the allocated stock range.",
+            len(serials),1,s,None,"POLLING_STATION",s,pid,"Valid Serial Observations","Required"))
+
+        dup=cur.execute("""
+            SELECT COUNT(*)::INTEGER n FROM (
+                SELECT serial_number
+                FROM ballot_security_observations
+                WHERE election_id=%s AND ballot_specification_id=%s
+                  AND serial_number IS NOT NULL
+                GROUP BY serial_number HAVING COUNT(*)>1
+            ) d
+        """,(election_id,r["ballot_specification_id"])).fetchone()["n"]
+        out.append(Finding("R019",PASSED if dup==0 else FAILED,
+            f"{s} {pid}: {dup} duplicated serial number group(s) found for this contest.",
+            dup,0,s,None,"POLLING_STATION",s,pid,"Duplicate Serial Groups","Expected Zero"))
+
+        batch_position_ok=r["batch_position"] in (None,pid)
+        out.append(Finding("R020",PASSED if batch_position_ok else FAILED,
+            f"{s} {pid}: ballot stock batch {'matches' if batch_position_ok else 'does not match'} the contest specification.",
+            1 if batch_position_ok else 0,1,s,None,"POLLING_STATION",s,pid,"Batch Contest Match","Required"))
+
+    return out
+
+
 def audit_election(election_id:str,scope:AuditScope)->tuple[int,list[dict],bool,int|None]:
     with psycopg.connect(**db_kwargs()) as conn:
         with conn.cursor() as cur:
@@ -467,6 +589,7 @@ def audit_election(election_id:str,scope:AuditScope)->tuple[int,list[dict],bool,
             findings.extend(chronology_findings(rows,scope.position_id))
             findings.extend(result_changes(cur,election_id,stations,scope.position_id,scope.candidate_id))
             findings.extend(integrity_findings(cur,election_id,stations,scope.position_id,scope.candidate_id))
+            findings.extend(ballot_security_findings(cur,election_id,stations,scope.position_id))
             findings.extend(aggregate_findings(cur,election_id,scope,stations,geos))
             write_findings(cur,run_id,election_id,findings,scope.position_id)
             cur.execute("UPDATE audit_runs SET completed_at=%s,status='COMPLETED',findings_count=%s WHERE audit_run_id=%s",(now_utc(),len(findings),run_id))
