@@ -217,6 +217,25 @@ def main() -> int:
                         f"Expected 10,443 historical diaspora registered voters, found: {diaspora_station_stats['registered_voters']}"
                     )
 
+                prison_station_stats = cur.execute("""
+                    SELECT COUNT(*) AS station_count,
+                           COALESCE(SUM(registered_voters),0) AS registered_voters
+                    FROM polling_stations ps
+                    JOIN special_voting_areas sva
+                      ON sva.special_voting_area_id = ps.special_voting_area_id
+                    WHERE ps.election_id=%s
+                      AND ps.location_type='SPECIAL'
+                      AND sva.voting_category='PRISON'
+                """, (args.election_id,)).fetchone()
+                if prison_station_stats["station_count"] != 106:
+                    failures.append(
+                        f"Expected 106 historical prison Gazette polling-station rows, found: {prison_station_stats['station_count']}"
+                    )
+                if prison_station_stats["registered_voters"] != 7483:
+                    failures.append(
+                        f"Expected 7,483 historical prison registered voters, found: {prison_station_stats['registered_voters']}"
+                    )
+
                 special_location_errors = cur.execute("""
                     SELECT COUNT(*) AS n
                     FROM polling_stations
