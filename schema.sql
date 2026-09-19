@@ -1002,8 +1002,7 @@ CREATE TABLE candidate_electoral_areas (
             OR (candidate_type='INDEPENDENT' AND party_id IS NULL)),
 
     CONSTRAINT unique_candidate_area_assignment
-        UNIQUE (candidate_id, election_id),
-
+        UNIQUE (candidate_id, election_id)
 );
 
 CREATE UNIQUE INDEX uq_party_candidate_slot
