@@ -169,6 +169,78 @@ def ensure_schema(cur) -> None:
         )
     """)
     cur.execute("""
+        ALTER TABLE ballot_accounting_observations ADD COLUMN IF NOT EXISTS position_id TEXT
+    """)
+    cur.execute("""
+        ALTER TABLE ballot_accounting_observations ADD COLUMN IF NOT EXISTS turnout_observation_id BIGINT
+    """)
+    cur.execute("""
+        ALTER TABLE ballot_accounting_observations DROP CONSTRAINT IF EXISTS unique_ballot_observation_version
+    """)
+    cur.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_ballot_accounting_station_position_version
+        ON ballot_accounting_observations(election_id,polling_station_id,position_id,observation_version)
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS ballot_specifications (
+            ballot_specification_id TEXT PRIMARY KEY,
+            election_id TEXT NOT NULL REFERENCES elections(election_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+            position_id TEXT NOT NULL REFERENCES positions(position_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+            colour_name TEXT, colour_code TEXT, paper_description TEXT, paper_size TEXT, paper_finish TEXT,
+            counterfoil_required BOOLEAN NOT NULL DEFAULT TRUE, official_mark_required BOOLEAN NOT NULL DEFAULT TRUE,
+            source_document_id BIGINT REFERENCES source_documents(document_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(election_id,position_id)
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS ballot_security_features (
+            security_feature_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            ballot_specification_id TEXT NOT NULL REFERENCES ballot_specifications(ballot_specification_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+            feature_type TEXT NOT NULL, feature_code TEXT, description TEXT NOT NULL, verification_method TEXT,
+            required BOOLEAN NOT NULL DEFAULT TRUE,
+            source_document_id BIGINT REFERENCES source_documents(document_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(ballot_specification_id,feature_type)
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS ballot_stock_batches (
+            ballot_batch_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            election_id TEXT NOT NULL REFERENCES elections(election_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+            position_id TEXT NOT NULL REFERENCES positions(position_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+            ballot_specification_id TEXT NOT NULL REFERENCES ballot_specifications(ballot_specification_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+            polling_station_id TEXT, serial_start TEXT NOT NULL, serial_end TEXT NOT NULL,
+            quantity INTEGER NOT NULL CHECK(quantity > 0),
+            source_document_id BIGINT REFERENCES source_documents(document_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+            allocation_status TEXT NOT NULL DEFAULT 'ALLOCATED', notes TEXT,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(election_id,position_id,polling_station_id,serial_start,serial_end)
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS ballot_security_observations (
+            ballot_security_observation_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            election_id TEXT NOT NULL REFERENCES elections(election_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+            polling_station_id TEXT NOT NULL,
+            ballot_specification_id TEXT NOT NULL REFERENCES ballot_specifications(ballot_specification_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+            ballot_batch_id BIGINT REFERENCES ballot_stock_batches(ballot_batch_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+            security_feature_id BIGINT REFERENCES ballot_security_features(security_feature_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+            serial_number TEXT,
+            observed_status TEXT NOT NULL CHECK(observed_status IN('PASS','FAIL','NOT_VERIFIED','NOT_PRESENT')),
+            observed_value TEXT, verification_method TEXT,
+            source_document_id BIGINT REFERENCES source_documents(document_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+            source_reference TEXT UNIQUE,
+            observed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ballot_security_features_spec ON ballot_security_features(ballot_specification_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ballot_stock_batches_lookup ON ballot_stock_batches(election_id,position_id,polling_station_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ballot_security_observations_station ON ballot_security_observations(election_id,polling_station_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ballot_security_observations_serial ON ballot_security_observations(election_id,ballot_specification_id,serial_number)")
+
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS published_aggregate_totals (
             published_aggregate_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
             election_id TEXT NOT NULL REFERENCES elections(election_id), source_document_id BIGINT NOT NULL REFERENCES source_documents(document_id),
@@ -210,7 +282,7 @@ def seed_positions(cur) -> None:
         """,(pid,name,office,geo,code,seq))
 
 
-def seed_sources(cur) -> tuple[int,int]:
+def seed_sources(cur) -> tuple[int,int,int]:
     for sid,name in ((SOURCE_ID,"ETVS controlled sample source"),(PUBLISHED_SOURCE_ID,"Published aggregate comparison source"),(BALLOT_SPEC_SOURCE_ID,"IEBC ballot-paper specification source")):
         cur.execute("""
             INSERT INTO sources(source_id,source_name,source_type,organization_name,description)
@@ -224,7 +296,7 @@ def seed_sources(cur) -> tuple[int,int]:
         row=cur.execute("""
             INSERT INTO source_documents(source_id,document_name,document_type,document_uri,content_hash)
             VALUES(%s,%s,'SEEDED_DATASET',%s,%s)
-            ON CONFLICT(source_id,document_name,content_hash) DO UPDATE SET document_uri='seed.py'
+            ON CONFLICT(source_id,document_name,content_hash) DO UPDATE SET document_uri=EXCLUDED.document_uri
             RETURNING document_id
         """,(sid,name,uri,h)).fetchone()
         ids.append(int(row["document_id"]))
@@ -369,7 +441,7 @@ def seed_ballot_security(cur, ballot_source_document_id:int) -> None:
                 """,(
                     ELECTION_ID,s.station_id,spec_id,batch["ballot_batch_id"],
                     feat["security_feature_id"],serial,
-                    "Expected security feature present in controlled fixture",
+                    colour if feat["feature_type"]=="PAPER" else "Expected security feature present in controlled fixture",
                     "ETVS fixture verification",ballot_source_document_id,
                     f"SEED-BALLOT-SECURITY-{s.station_id}-{pid}-{feat['feature_type']}"
                 ))
