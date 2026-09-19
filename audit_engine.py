@@ -231,7 +231,8 @@ def turnout_interval_findings(cur,election_id:str,station_ids:set[str])->list[Fi
         return []
     rows=cur.execute("""
         SELECT t.polling_station_id,t.observation_version,t.voters_turnout,t.observed_at,
-               c.interval_minutes,c.reporting_enabled,c.effective_from,c.effective_to
+               t.interval_configuration_id,c.turnout_interval_id,c.interval_minutes,c.reporting_enabled,
+               c.effective_from,c.effective_to
         FROM turnout_observations t
         LEFT JOIN turnout_reporting_intervals c
           ON c.turnout_interval_id=t.interval_configuration_id
@@ -247,16 +248,18 @@ def turnout_interval_findings(cur,election_id:str,station_ids:set[str])->list[Fi
             if not r["reporting_enabled"] or r["interval_minutes"] is None:
                 previous=r
                 continue
-            if previous is None:
+            new_configuration = previous is not None and previous["interval_configuration_id"] != r["interval_configuration_id"]
+            if previous is None or new_configuration:
                 gap_minutes=(r["observed_at"]-r["effective_from"]).total_seconds()/60 if r["effective_from"] else None
                 expected=r["interval_minutes"]
+                context="after the new interval configuration became effective" if new_configuration else "from the interval configuration start"
                 if gap_minutes is None:
                     ok=False
                     message=f"{station}: turnout observation v{r['observation_version']} has no usable interval start time."
                 else:
                     ok=round(gap_minutes,6)==expected
-                    message=(f"{station}: first turnout entry was recorded after {gap_minutes:g} minutes; "
-                             f"configured interval is {expected} minutes.")
+                    message=(f"{station}: turnout observation v{r['observation_version']} was recorded after {gap_minutes:g} minutes "
+                             f"{context}; configured interval is {expected} minutes.")
                 out.append(Finding("R014",PASSED if ok else WARNING,message,
                     int(round(gap_minutes)) if gap_minutes is not None else None,expected,station,None,
                     "POLLING_STATION",station,None,"Observed Minutes From Interval Start","Configured Interval Minutes"))
