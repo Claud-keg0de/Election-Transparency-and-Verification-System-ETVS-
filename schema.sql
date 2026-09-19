@@ -365,6 +365,10 @@ CREATE TABLE polling_stations (
 
     registered_voters INTEGER NOT NULL,
 
+    -- Minimum elapsed time permitted between successive turnout observations.
+    -- This is an ETVS audit/data-collection policy, not an IEBC universal rule.
+    turnout_reporting_interval_minutes INTEGER NOT NULL DEFAULT 30,
+
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
     CONSTRAINT fk_polling_station_election
@@ -381,6 +385,9 @@ CREATE TABLE polling_stations (
 
     CONSTRAINT polling_station_registered_voters_non_negative
         CHECK (registered_voters >= 0),
+
+    CONSTRAINT polling_station_turnout_interval_positive
+        CHECK (turnout_reporting_interval_minutes BETWEEN 1 AND 1440),
 
     CONSTRAINT unique_polling_station_code_per_election
         UNIQUE (election_id, polling_station_code),
@@ -540,6 +547,21 @@ CREATE INDEX idx_published_aggregate_lookup
     ON published_aggregate_totals(election_id, aggregation_level, geography_id);
 
 
+
+/*
+===============================================================================
+POLLING-STATION TURNOUT REPORTING INTERVAL
+===============================================================================
+
+Each polling station has its own turnout_reporting_interval_minutes setting.
+The interval is the minimum elapsed time permitted between successive turnout
+observations for that station. ETVS enforces it as audit rule R021.
+
+This is an ETVS audit/data-collection policy. It must not be presented as a
+universal IEBC reporting requirement unless an authoritative IEBC source
+establishes such a requirement.
+===============================================================================
+*/
 
 /*
 ===============================================================================
@@ -1463,6 +1485,9 @@ CREATE INDEX idx_registration_centres_ward
 
 CREATE INDEX idx_polling_stations_election
     ON polling_stations(election_id);
+
+CREATE INDEX idx_polling_station_turnout_interval
+    ON polling_stations(election_id, polling_station_id, turnout_reporting_interval_minutes);
 
 
 CREATE INDEX idx_polling_stations_registration_centre
