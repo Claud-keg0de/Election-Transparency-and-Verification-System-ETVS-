@@ -360,7 +360,7 @@ def seed_master_data(cur) -> None:
             cur.execute("""
                 INSERT INTO candidates(candidate_id,election_id,candidate_name,office,position_id)
                 VALUES(%s,%s,%s,%s,%s) ON CONFLICT(candidate_id) DO UPDATE SET candidate_name=EXCLUDED.candidate_name,office=EXCLUDED.office,position_id=EXCLUDED.position_id
-            """,(cid,ELECTION_ID,name,pname))
+            """,(cid,ELECTION_ID,name,pname,pid))
 
 
 def seed_ballot_security(cur, ballot_source_document_id:int) -> None:
