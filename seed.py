@@ -167,7 +167,8 @@ def ensure_schema(cur) -> None:
             CHECK (slot_number > 0),
             CHECK (registered_voters IS NULL OR registered_voters >= 0),
             UNIQUE (election_id, slot_code),
-            UNIQUE (election_id, special_voting_area_id, slot_number)
+            UNIQUE (election_id, special_voting_area_id, slot_number),
+            UNIQUE (special_voting_slot_id, special_voting_area_id)
         )
     """)
     cur.execute("""
