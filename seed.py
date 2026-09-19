@@ -217,6 +217,19 @@ def ensure_schema(cur) -> None:
             election_level TEXT NOT NULL, geography_level TEXT NOT NULL
         )
     """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS special_area_contest_rules (
+            special_area_contest_rule_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            special_voting_area_id TEXT NOT NULL REFERENCES special_voting_areas(special_voting_area_id),
+            position_id TEXT NOT NULL REFERENCES positions(position_id),
+            reference_year INTEGER NOT NULL,
+            eligibility_status TEXT NOT NULL CHECK (eligibility_status IN ('ALLOWED','NOT_ELIGIBLE')),
+            source_document_id BIGINT REFERENCES source_documents(document_id),
+            notes TEXT,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE (special_voting_area_id, position_id, reference_year)
+        )
+    """)
     for table in ("turnout_observations", "ballot_accounting_observations", "result_submissions"):
         cur.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS source_document_id BIGINT")
         cur.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS observed_at TIMESTAMPTZ")
@@ -349,6 +362,7 @@ def reset_sample(cur) -> None:
         "DELETE FROM polling_stations WHERE election_id=%s",
         "DELETE FROM independent_candidate_symbols WHERE election_id=%s",
         "DELETE FROM candidates WHERE election_id=%s",
+        "DELETE FROM special_area_contest_rules WHERE special_voting_area_id IN (SELECT special_voting_area_id FROM special_voting_areas WHERE election_id=%s)",
         "DELETE FROM special_voting_areas WHERE election_id=%s",
         "DELETE FROM elections WHERE election_id=%s",
     ):
@@ -639,6 +653,45 @@ def seed_special_voting_areas(cur, source_document_id: int) -> None:
                 reporting_enabled=FALSE
         """, (ELECTION_ID, station_id, datetime(2022, 8, 9, 5, 0, tzinfo=timezone.utc)))
 
+
+def seed_special_area_contest_rules(cur) -> None:
+    """Record historical 2022 special-area contest eligibility separately.
+
+    Both diaspora and prison voters are recorded as presidential-only for the
+    2022 historical reference. These rows are explicitly keyed to 2022 and do
+    not authorize the 2027 sample election.
+    """
+    area_ids = [
+        r["special_voting_area_id"]
+        for r in cur.execute("""
+            SELECT special_voting_area_id
+            FROM special_voting_areas
+            WHERE election_id=%s
+            ORDER BY special_voting_area_id
+        """, (ELECTION_ID,)).fetchall()
+    ]
+    for area_id in area_ids:
+        for position_id, *_ in POSITIONS:
+            status = "ALLOWED" if position_id == "POS-PRESIDENT" else "NOT_ELIGIBLE"
+            cur.execute("""
+                INSERT INTO special_area_contest_rules(
+                    special_voting_area_id,position_id,reference_year,
+                    eligibility_status,source_document_id,notes
+                )
+                VALUES(%s,%s,2022,%s,NULL,%s)
+                ON CONFLICT(special_voting_area_id,position_id,reference_year)
+                DO UPDATE SET eligibility_status=EXCLUDED.eligibility_status,
+                              source_document_id=NULL,
+                              notes=EXCLUDED.notes
+            """, (
+                area_id,
+                position_id,
+                status,
+                "Historical 2022 IEBC reference; presidential-only special voting rule. "
+                "This does not determine 2027 eligibility.",
+            ))
+
+
 def seed_turnout_intervals(cur) -> None:
     """Seed one independently configurable reporting interval for every station."""
     base=datetime(2027,8,10,8,0,tzinfo=timezone.utc)
@@ -806,7 +859,7 @@ def main()->int:
             with conn.cursor() as cur:
                 ensure_schema(cur)
                 if a.reset:reset_sample(cur)
-                seed_positions(cur);source_doc,published_doc=seed_sources(cur);seed_master_data(cur);seed_special_voting_areas(cur,source_doc);seed_turnout_intervals(cur);seed_observations(cur,source_doc);seed_results(cur,source_doc);seed_published_aggregates(cur,published_doc);ensure_reporting_views(cur);check(cur)
+                seed_positions(cur);source_doc,published_doc=seed_sources(cur);seed_master_data(cur);seed_special_voting_areas(cur,source_doc);seed_special_area_contest_rules(cur);seed_turnout_intervals(cur);seed_observations(cur,source_doc);seed_results(cur,source_doc);seed_published_aggregates(cur,published_doc);ensure_reporting_views(cur);check(cur)
             conn.commit()
         print("\nSEED SUCCESS: PostgreSQL data committed successfully.");return 0
     except Exception as exc:print(f"\nSEED FAILED: {exc}");return 1
