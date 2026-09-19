@@ -343,6 +343,98 @@ def ensure_schema(cur) -> None:
     """)
 
 
+    cur.execute("ALTER TABLE candidates DROP CONSTRAINT IF EXISTS unique_candidate_per_election")
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS candidate_electoral_areas (
+            candidate_electoral_area_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            candidate_id TEXT NOT NULL,
+            election_id TEXT NOT NULL,
+            position_id TEXT NOT NULL,
+            electoral_area_type TEXT NOT NULL,
+            electoral_area_id TEXT NOT NULL,
+            candidate_type TEXT NOT NULL,
+            party_id TEXT,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (candidate_id,election_id) REFERENCES candidates(candidate_id,election_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+            FOREIGN KEY (position_id) REFERENCES positions(position_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+            FOREIGN KEY (party_id) REFERENCES political_parties(party_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+            CHECK (electoral_area_type IN ('NATIONAL','COUNTY','CONSTITUENCY','WARD')),
+            CHECK (candidate_type IN ('PARTY','INDEPENDENT')),
+            CHECK ((candidate_type='PARTY' AND party_id IS NOT NULL) OR (candidate_type='INDEPENDENT' AND party_id IS NULL)),
+            UNIQUE (candidate_id,election_id)
+        )
+    """)
+    cur.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_party_candidate_slot
+        ON candidate_electoral_areas(election_id,position_id,electoral_area_type,electoral_area_id,party_id)
+        WHERE candidate_type='PARTY'
+    """)
+    cur.execute("""
+        CREATE OR REPLACE FUNCTION validate_candidate_electoral_area()
+        RETURNS trigger LANGUAGE plpgsql AS $
+        DECLARE expected_geography TEXT; candidate_position TEXT; candidate_party TEXT; candidate_kind TEXT;
+        BEGIN
+            SELECT p.geography_level,c.position_id,c.party_id,c.candidate_type
+              INTO expected_geography,candidate_position,candidate_party,candidate_kind
+              FROM candidates c JOIN positions p ON p.position_id=c.position_id
+             WHERE c.candidate_id=NEW.candidate_id AND c.election_id=NEW.election_id;
+            IF NOT FOUND THEN RAISE EXCEPTION 'Candidate % does not belong to election %',NEW.candidate_id,NEW.election_id; END IF;
+            IF NEW.position_id<>candidate_position THEN RAISE EXCEPTION 'Candidate position mismatch for %',NEW.candidate_id; END IF;
+            IF NEW.electoral_area_type<>expected_geography THEN RAISE EXCEPTION 'Position % requires % area, not %',NEW.position_id,expected_geography,NEW.electoral_area_type; END IF;
+            IF NEW.candidate_type<>candidate_kind OR NEW.party_id IS DISTINCT FROM candidate_party THEN RAISE EXCEPTION 'Candidate affiliation mismatch for %',NEW.candidate_id; END IF;
+            IF NEW.electoral_area_type='NATIONAL' AND NEW.electoral_area_id<>'NATIONAL' THEN RAISE EXCEPTION 'National contests must use NATIONAL area'; END IF;
+            IF NEW.electoral_area_type='COUNTY' AND NOT EXISTS (SELECT 1 FROM counties WHERE county_id=NEW.electoral_area_id) THEN RAISE EXCEPTION 'Unknown county area %',NEW.electoral_area_id; END IF;
+            IF NEW.electoral_area_type='CONSTITUENCY' AND NOT EXISTS (SELECT 1 FROM constituencies WHERE constituency_id=NEW.electoral_area_id) THEN RAISE EXCEPTION 'Unknown constituency area %',NEW.electoral_area_id; END IF;
+            IF NEW.electoral_area_type='WARD' AND NOT EXISTS (SELECT 1 FROM wards WHERE ward_id=NEW.electoral_area_id) THEN RAISE EXCEPTION 'Unknown ward area %',NEW.electoral_area_id; END IF;
+            RETURN NEW;
+        END $;
+    """)
+    cur.execute("DROP TRIGGER IF EXISTS trg_validate_candidate_electoral_area ON candidate_electoral_areas")
+    cur.execute("""
+        CREATE TRIGGER trg_validate_candidate_electoral_area
+        BEFORE INSERT OR UPDATE ON candidate_electoral_areas
+        FOR EACH ROW EXECUTE FUNCTION validate_candidate_electoral_area()
+    """)
+    cur.execute("""
+        CREATE OR REPLACE FUNCTION validate_result_candidate_electoral_area()
+        RETURNS trigger LANGUAGE plpgsql AS $
+        DECLARE station_area_type TEXT; station_area_id TEXT; candidate_area_type TEXT; candidate_area_id TEXT;
+        BEGIN
+            SELECT p.geography_level,
+                   CASE p.geography_level
+                     WHEN 'NATIONAL' THEN 'NATIONAL'
+                     WHEN 'COUNTY' THEN co.county_id
+                     WHEN 'CONSTITUENCY' THEN co2.constituency_id
+                     WHEN 'WARD' THEN w.ward_id
+                   END
+              INTO station_area_type,station_area_id
+              FROM polling_stations ps
+              LEFT JOIN registration_centres rc ON rc.registration_centre_id=ps.registration_centre_id
+              LEFT JOIN wards w ON w.ward_id=rc.ward_id
+              LEFT JOIN constituencies co2 ON co2.constituency_id=w.constituency_id
+              LEFT JOIN counties co ON co.county_id=co2.county_id
+              JOIN positions p ON p.position_id=NEW.position_id
+             WHERE ps.polling_station_id=NEW.polling_station_id AND ps.election_id=NEW.election_id;
+            IF NOT FOUND THEN RAISE EXCEPTION 'Cannot resolve polling station % and position %',NEW.polling_station_id,NEW.position_id; END IF;
+            IF EXISTS (SELECT 1 FROM polling_stations WHERE polling_station_id=NEW.polling_station_id AND location_type='SPECIAL') THEN RETURN NEW; END IF;
+            SELECT electoral_area_type,electoral_area_id INTO candidate_area_type,candidate_area_id
+              FROM candidate_electoral_areas
+             WHERE candidate_id=NEW.candidate_id AND election_id=NEW.election_id AND position_id=NEW.position_id;
+            IF NOT FOUND THEN RAISE EXCEPTION 'Candidate % has no electoral-area assignment',NEW.candidate_id; END IF;
+            IF candidate_area_type<>station_area_type OR candidate_area_id<>station_area_id THEN
+                RAISE EXCEPTION 'Candidate % is not valid for polling station % area (%:%)',NEW.candidate_id,NEW.polling_station_id,station_area_type,station_area_id;
+            END IF;
+            RETURN NEW;
+        END $;
+    """)
+    cur.execute("DROP TRIGGER IF EXISTS trg_validate_result_candidate_electoral_area ON result_submissions")
+    cur.execute("""
+        CREATE TRIGGER trg_validate_result_candidate_electoral_area
+        BEFORE INSERT OR UPDATE ON result_submissions
+        FOR EACH ROW EXECUTE FUNCTION validate_result_candidate_electoral_area()
+    """)
+
+
 def ensure_reporting_views(cur) -> None:
     """Create stable dashboard views; these never alter source observations."""
     cur.execute("""
@@ -531,30 +623,48 @@ def seed_master_data(cur) -> None:
                 registered_voters=EXCLUDED.registered_voters
         """, (s.station_id,ELECTION_ID,s.centre_id,s.code,s.registered))
 
+    # Candidate slots are seeded for the applicable electoral area:
+    # President -> national; Governor/Senator/Women Rep -> county;
+    # MP -> constituency; MCA -> ward.
+    contest_areas = {
+        "POS-PRESIDENT": [("NATIONAL", "NATIONAL")],
+        "POS-GOVERNOR": [("COUNTY", "KE-026")],
+        "POS-SENATOR": [("COUNTY", "KE-026")],
+        "POS-WOMEN-REP": [("COUNTY", "KE-026")],
+        "POS-MP": [("CONSTITUENCY", "KE-C136"), ("CONSTITUENCY", "KE-C137")],
+        "POS-MCA": [("WARD", "W001"), ("WARD", "W002"), ("WARD", "W003"), ("WARD", "W004")],
+    }
+    cur.execute("DELETE FROM candidate_electoral_areas WHERE election_id=%s", (ELECTION_ID,))
+    cur.execute("DELETE FROM candidates WHERE election_id=%s", (ELECTION_ID,))
     for pid,pname,_,_,_,_ in POSITIONS:
-        for n,name in ((1,"Amina Njeri"),(2,"Brian Wanyonyi"),(3,"David Mwangi")):
-            cid=f"{pid}-C{n:03d}"
-            candidate_type='INDEPENDENT' if n==3 else 'PARTY'
-            party_id=None if n==3 else ('PTY-ALPHA' if n==1 else 'PTY-BETA')
-            cur.execute("""
-                INSERT INTO candidates(candidate_id,election_id,candidate_name,office,position_id,candidate_type,party_id)
-                VALUES(%s,%s,%s,%s,%s,%s,%s)
-                ON CONFLICT(candidate_id) DO UPDATE SET candidate_name=EXCLUDED.candidate_name,
-                    office=EXCLUDED.office,position_id=EXCLUDED.position_id,
-                    candidate_type=EXCLUDED.candidate_type,party_id=EXCLUDED.party_id
-            """, (cid,ELECTION_ID,name,pname,pid,candidate_type,party_id))
-            if candidate_type=='INDEPENDENT':
+        for area_type, area_id in contest_areas[pid]:
+            for n,name in ((1,"Amina Njeri"),(2,"Brian Wanyonyi"),(3,"David Mwangi")):
+                cid=f"{pid}-{area_id}-C{n:03d}"
+                candidate_type='INDEPENDENT' if n==3 else 'PARTY'
+                party_id=None if n==3 else ('PTY-ALPHA' if n==1 else 'PTY-BETA')
                 cur.execute("""
-                    INSERT INTO independent_candidate_symbols(
-                        candidate_id,election_id,symbol_name,symbol_uri,approved,approved_at
-                    )
-                    VALUES(%s,%s,%s,%s,TRUE,%s)
-                    ON CONFLICT(candidate_id) DO UPDATE SET
-                        election_id=EXCLUDED.election_id,symbol_name=EXCLUDED.symbol_name,
-                        symbol_uri=EXCLUDED.symbol_uri,approved=EXCLUDED.approved,
-                        approved_at=EXCLUDED.approved_at
-                """, (cid,ELECTION_ID,f"Independent symbol for {name}",
-                      f"seed://symbols/{cid.lower()}",datetime(2027,7,1).date()))
+                    INSERT INTO candidates(candidate_id,election_id,candidate_name,office,position_id,candidate_type,party_id)
+                    VALUES(%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT(candidate_id) DO UPDATE SET candidate_name=EXCLUDED.candidate_name,
+                        office=EXCLUDED.office,position_id=EXCLUDED.position_id,
+                        candidate_type=EXCLUDED.candidate_type,party_id=EXCLUDED.party_id
+                """, (cid,ELECTION_ID,name,pname,pid,candidate_type,party_id))
+                cur.execute("""
+                    INSERT INTO candidate_electoral_areas(
+                        candidate_id,election_id,position_id,electoral_area_type,electoral_area_id,candidate_type,party_id
+                    ) VALUES(%s,%s,%s,%s,%s,%s,%s)
+                """, (cid,ELECTION_ID,pid,area_type,area_id,candidate_type,party_id))
+                if candidate_type=='INDEPENDENT':
+                    cur.execute("""
+                        INSERT INTO independent_candidate_symbols(
+                            candidate_id,election_id,symbol_name,symbol_uri,approved,approved_at
+                        ) VALUES(%s,%s,%s,%s,TRUE,%s)
+                        ON CONFLICT(candidate_id) DO UPDATE SET
+                            election_id=EXCLUDED.election_id,symbol_name=EXCLUDED.symbol_name,
+                            symbol_uri=EXCLUDED.symbol_uri,approved=EXCLUDED.approved,
+                            approved_at=EXCLUDED.approved_at
+                    """, (cid,ELECTION_ID,f"Independent symbol for {name} ({area_id})",
+                          f"seed://symbols/{cid.lower()}",datetime(2027,7,1).date()))
 
     cur.execute("""
         DO $ BEGIN
@@ -829,17 +939,35 @@ def votes_for(valid:int,split:tuple[float,float,float])->tuple[int,int,int]:
 
 
 def seed_results(cur,source_document_id:int)->None:
-    """Create candidate results separately for all six positions."""
+    """Create candidate results using the candidate nominated for each station's area."""
+    station_rows=cur.execute("""
+        SELECT ps.polling_station_id,w.ward_id,c.constituency_id,co.county_id
+        FROM polling_stations ps
+        JOIN registration_centres rc ON rc.registration_centre_id=ps.registration_centre_id
+        JOIN wards w ON w.ward_id=rc.ward_id
+        JOIN constituencies c ON c.constituency_id=w.constituency_id
+        JOIN counties co ON co.county_id=c.county_id
+        WHERE ps.election_id=%s
+    """,(ELECTION_ID,)).fetchall()
     for s in STATIONS:
+        area_row=next(r for r in station_rows if r["polling_station_id"]==s.station_id)
+        area_by_position={
+            "POS-PRESIDENT":("NATIONAL","NATIONAL"),
+            "POS-GOVERNOR":("COUNTY",area_row["county_id"]),
+            "POS-SENATOR":("COUNTY",area_row["county_id"]),
+            "POS-WOMEN-REP":("COUNTY",area_row["county_id"]),
+            "POS-MP":("CONSTITUENCY",area_row["constituency_id"]),
+            "POS-MCA":("WARD",area_row["ward_id"]),
+        }
         for pid,*_ in POSITIONS:
             valid,_,_=BASE_ACCOUNTING[s.station_id]
             votes=votes_for(valid,VOTE_SPLITS[s.station_id])
+            area_type,area_id=area_by_position[pid]
             for n,base_votes in enumerate(votes,1):
-                cid=f"{pid}-C{n:03d}"
+                cid=f"{pid}-{area_id}-C{n:03d}"
                 versions=(1,2) if s.station_id=="PS005" and pid=="POS-PRESIDENT" and n==1 else (1,)
                 for version in versions:
                     final=base_votes+5 if version==2 else base_votes
-                    # PS006 President deliberately becomes 660 > turnout 650.
                     if s.station_id=="PS006" and pid=="POS-PRESIDENT" and n==1: final+=40
                     when=datetime(2027,8,10,18,0,tzinfo=timezone.utc)+timedelta(minutes=len(pid)+n+version)
                     h=digest("RESULT",ELECTION_ID,s.station_id,cid,version,final)
@@ -892,7 +1020,7 @@ def seed_published_aggregates(cur,source_document_id:int)->None:
         k=(level,gid,r["candidate_id"],r["position_id"]);totals[k]=totals.get(k,0)+r["votes"]
     for (level,gid,cid,pid),value in totals.items():
         # One publication is intentionally wrong to prove an aggregate failure.
-        if level=="CONSTITUENCY" and gid=="CON001" and cid=="POS-MP-C001": value+=7
+        if level=="CONSTITUENCY" and gid=="CON001" and cid=="POS-MP-KE-C136-C001": value+=7
         cur.execute("""
             INSERT INTO published_aggregate_totals(election_id,source_document_id,aggregation_level,geography_id,candidate_id,position_id,metric,reported_value)
             VALUES(%s,%s,%s,%s,%s,%s,'CANDIDATE_VOTES',%s)
@@ -902,7 +1030,7 @@ def seed_published_aggregates(cur,source_document_id:int)->None:
 
 def check(cur)->None:
     print("\nETVS SEED VERIFICATION\n"+"="*82)
-    tables=("special_voting_slots","special_voting_area_reference_stations","positions","elections","counties","constituencies","wards","registration_centres","polling_stations","turnout_reporting_intervals","registered_voter_observations","turnout_observations","ballot_accounting_observations","candidates","result_submissions","published_aggregate_totals","audit_runs","audit_findings")
+    tables=("special_voting_slots","special_voting_area_reference_stations","positions","candidate_electoral_areas","elections","counties","constituencies","wards","registration_centres","polling_stations","turnout_reporting_intervals","registered_voter_observations","turnout_observations","ballot_accounting_observations","candidates","result_submissions","published_aggregate_totals","audit_runs","audit_findings")
     for table in tables:
         try: print(f"{table:38}{cur.execute(f'SELECT COUNT(*) AS n FROM {table}').fetchone()['n']:>7}")
         except psycopg.errors.UndefinedTable: print(f"{table:38} MISSING")
