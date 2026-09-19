@@ -80,3 +80,6 @@ jobs:
           SQL
           python audit_engine.py KE-PRES-2027 | tee /tmp/etvs-audit.txt
           grep -q "R014 FAILED" /tmp/etvs-audit.txt
+
+      - name: Verify hash chain after interval violation test
+        run: python audit_engine.py KE-PRES-2027 --verify-chain
