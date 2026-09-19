@@ -913,9 +913,6 @@ CREATE TABLE candidates (
         CHECK ((candidate_type = 'PARTY' AND party_id IS NOT NULL)
             OR (candidate_type = 'INDEPENDENT' AND party_id IS NULL)),
 
-    CONSTRAINT unique_candidate_per_election
-        UNIQUE (election_id, candidate_name, office),
-
     CONSTRAINT unique_candidate_election_pair
         UNIQUE (candidate_id, election_id)
 );
@@ -1007,11 +1004,11 @@ CREATE TABLE candidate_electoral_areas (
     CONSTRAINT unique_candidate_area_assignment
         UNIQUE (candidate_id, election_id),
 
-    CONSTRAINT unique_party_candidate_slot
-        UNIQUE NULLS NOT DISTINCT (
-            election_id, position_id, electoral_area_type, electoral_area_id, party_id
-        )
 );
+
+CREATE UNIQUE INDEX uq_party_candidate_slot
+    ON candidate_electoral_areas(election_id, position_id, electoral_area_type, electoral_area_id, party_id)
+    WHERE candidate_type='PARTY';
 
 CREATE INDEX idx_candidate_area_lookup
     ON candidate_electoral_areas(election_id, position_id, electoral_area_type, electoral_area_id);
