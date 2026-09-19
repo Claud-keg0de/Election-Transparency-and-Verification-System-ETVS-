@@ -96,6 +96,61 @@ def digest(*parts: object) -> str:
 def ensure_schema(cur) -> None:
     """Additive compatibility layer for databases created before this redesign."""
     cur.execute("""
+        CREATE TABLE IF NOT EXISTS regions (
+            region_id TEXT PRIMARY KEY,
+            region_name TEXT NOT NULL UNIQUE,
+            region_type TEXT NOT NULL DEFAULT 'FORMER_PROVINCE'
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS county_region_assignments (
+            county_id TEXT PRIMARY KEY,
+            region_id TEXT NOT NULL REFERENCES regions(region_id),
+            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS political_parties (
+            party_id TEXT PRIMARY KEY,
+            party_name TEXT NOT NULL UNIQUE,
+            party_abbreviation TEXT UNIQUE,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS party_symbols (
+            party_symbol_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            party_id TEXT NOT NULL REFERENCES political_parties(party_id),
+            symbol_name TEXT NOT NULL,
+            symbol_uri TEXT,
+            approved BOOLEAN NOT NULL DEFAULT TRUE,
+            effective_from DATE,
+            effective_to DATE,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE (party_id, symbol_name)
+        )
+    """)
+    cur.execute("ALTER TABLE candidates ADD COLUMN IF NOT EXISTS candidate_type TEXT NOT NULL DEFAULT 'PARTY'")
+    cur.execute("ALTER TABLE candidates ADD COLUMN IF NOT EXISTS party_id TEXT")
+    cur.execute("ALTER TABLE candidates DROP CONSTRAINT IF EXISTS candidate_type_check")
+    cur.execute("ALTER TABLE candidates DROP CONSTRAINT IF EXISTS candidate_party_affiliation_check")
+    cur.execute("ALTER TABLE candidates ADD CONSTRAINT candidate_type_check CHECK (candidate_type IN ('PARTY','INDEPENDENT'))")
+    cur.execute("ALTER TABLE candidates ADD CONSTRAINT candidate_party_affiliation_check CHECK ((candidate_type='PARTY' AND party_id IS NOT NULL) OR (candidate_type='INDEPENDENT' AND party_id IS NULL))")
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS independent_candidate_symbols (
+            independent_symbol_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            candidate_id TEXT NOT NULL UNIQUE,
+            election_id TEXT NOT NULL,
+            symbol_name TEXT NOT NULL,
+            symbol_uri TEXT,
+            approved BOOLEAN NOT NULL DEFAULT TRUE,
+            approved_at TIMESTAMPTZ,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE (candidate_id, election_id)
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_independent_symbols_candidate ON independent_candidate_symbols(candidate_id,election_id)")
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS registered_voter_observations (
             registered_voter_observation_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
             election_id TEXT NOT NULL REFERENCES elections(election_id),
@@ -243,11 +298,15 @@ def reset_sample(cur) -> None:
         "DELETE FROM turnout_observations WHERE election_id=%s",
         "DELETE FROM turnout_reporting_intervals WHERE election_id=%s",
         "DELETE FROM polling_stations WHERE election_id=%s",
+        "DELETE FROM independent_candidate_symbols WHERE election_id=%s",
         "DELETE FROM candidates WHERE election_id=%s",
         "DELETE FROM elections WHERE election_id=%s",
     ):
         try: cur.execute(sql,(ELECTION_ID,))
         except psycopg.errors.UndefinedTable: pass
+    cur.execute("DELETE FROM party_symbols WHERE party_id IN ('PTY-ALPHA','PTY-BETA')")
+    cur.execute("DELETE FROM political_parties WHERE party_id IN ('PTY-ALPHA','PTY-BETA')")
+    cur.execute("DELETE FROM county_region_assignments WHERE county_id='COUNTY001'")
     for table,column,values in (("registration_centres","registration_centre_id",["RC001","RC002","RC003","RC004","RC005","RC006"]),("wards","ward_id",["W001","W002","W003","W004"]),("constituencies","constituency_id",["CON001","CON002"]),("counties","county_id",["COUNTY001"])):
         cur.execute(f"DELETE FROM {table} WHERE {column}=ANY(%s)",(values,))
     cur.execute("DELETE FROM source_documents WHERE source_id IN (%s,%s)",(SOURCE_ID,PUBLISHED_SOURCE_ID))
@@ -255,12 +314,18 @@ def reset_sample(cur) -> None:
 
 
 def seed_master_data(cur) -> None:
+    regions=(('REG-01','Nairobi'),('REG-02','Central'),('REG-03','Coast'),('REG-04','Eastern'),('REG-05','North Eastern'),('REG-06','Nyanza'),('REG-07','Rift Valley'),('REG-08','Western'))
+    for rid,name in regions:
+        cur.execute("INSERT INTO regions(region_id,region_name,region_type) VALUES(%s,%s,'FORMER_PROVINCE') ON CONFLICT(region_id) DO UPDATE SET region_name=EXCLUDED.region_name",(rid,name))
     cur.execute("INSERT INTO elections(election_id,election_name,election_date,status) VALUES(%s,'ETVS Sample Election 2027','2027-08-10','ACTIVE') ON CONFLICT DO NOTHING",(ELECTION_ID,))
     cur.execute("INSERT INTO counties(county_id,county_name) VALUES('COUNTY001','Sample County') ON CONFLICT DO NOTHING")
     for cid,name in (("CON001","Greenfield Constituency"),("CON002","Riverdale Constituency")):
         cur.execute("INSERT INTO constituencies(constituency_id,constituency_name,county_id) VALUES(%s,%s,'COUNTY001') ON CONFLICT DO NOTHING",(cid,name))
     wards=(("W001","Greenfield Central","CON001"),("W002","Greenfield East","CON001"),("W003","Riverdale Central","CON002"),("W004","Riverdale East","CON002"))
     for wid,name,cid in wards:cur.execute("INSERT INTO wards(ward_id,ward_name,constituency_id) VALUES(%s,%s,%s) ON CONFLICT DO NOTHING",(wid,name,cid))
+    cur.execute("INSERT INTO county_region_assignments(county_id,region_id) VALUES('COUNTY001','REG-07') ON CONFLICT(county_id) DO UPDATE SET region_id=EXCLUDED.region_id")
+    cur.execute("INSERT INTO political_parties(party_id,party_name,party_abbreviation) VALUES('PTY-ALPHA','Civic Renewal Party','CRP'),('PTY-BETA','National Development Party','NDP') ON CONFLICT(party_id) DO UPDATE SET party_name=EXCLUDED.party_name,party_abbreviation=EXCLUDED.party_abbreviation")
+    cur.execute("INSERT INTO party_symbols(party_id,symbol_name,symbol_uri,approved) VALUES('PTY-ALPHA','Rising Sun','seed://symbols/crp-rising-sun',TRUE),('PTY-BETA','Open Book','seed://symbols/ndp-open-book',TRUE) ON CONFLICT(party_id,symbol_name) DO UPDATE SET symbol_uri=EXCLUDED.symbol_uri,approved=EXCLUDED.approved")
     centres=(("RC001","Greenfield Primary School","W001"),("RC002","Greenfield Community Hall","W002"),("RC003","Greenfield Secondary School","W001"),("RC004","Riverdale Primary School","W003"),("RC005","Riverdale Community Hall","W004"),("RC006","Riverdale Secondary School","W003"))
     for rid,name,wid in centres:cur.execute("INSERT INTO registration_centres(registration_centre_id,registration_centre_name,ward_id) VALUES(%s,%s,%s) ON CONFLICT DO NOTHING",(rid,name,wid))
     for s in STATIONS:
@@ -272,10 +337,21 @@ def seed_master_data(cur) -> None:
     for pid,pname,_,_,_,_ in POSITIONS:
         for n,name in ((1,"Amina Njeri"),(2,"Brian Wanyonyi"),(3,"David Mwangi")):
             cid=f"{pid}-C{n:03d}"
+            candidate_type='INDEPENDENT' if n==3 else 'PARTY'
+            party_id=None if n==3 else ('PTY-ALPHA' if n==1 else 'PTY-BETA')
             cur.execute("""
-                INSERT INTO candidates(candidate_id,election_id,candidate_name,office,position_id)
-                VALUES(%s,%s,%s,%s,%s) ON CONFLICT(candidate_id) DO UPDATE SET candidate_name=EXCLUDED.candidate_name,office=EXCLUDED.office,position_id=EXCLUDED.position_id
-            """,(cid,ELECTION_ID,name,pname))
+                INSERT INTO candidates(candidate_id,election_id,candidate_name,office,position_id,candidate_type,party_id)
+                VALUES(%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT(candidate_id) DO UPDATE SET candidate_name=EXCLUDED.candidate_name,office=EXCLUDED.office,
+                    position_id=EXCLUDED.position_id,candidate_type=EXCLUDED.candidate_type,party_id=EXCLUDED.party_id
+            """,(cid,ELECTION_ID,name,pname,pid,candidate_type,party_id))
+            if candidate_type=='INDEPENDENT':
+                cur.execute("""
+                    INSERT INTO independent_candidate_symbols(candidate_id,election_id,symbol_name,symbol_uri,approved,approved_at)
+                    VALUES(%s,%s,%s,%s,TRUE,%s)
+                    ON CONFLICT(candidate_id) DO UPDATE SET election_id=EXCLUDED.election_id,symbol_name=EXCLUDED.symbol_name,
+                        symbol_uri=EXCLUDED.symbol_uri,approved=EXCLUDED.approved,approved_at=EXCLUDED.approved_at
+                """,(cid,ELECTION_ID,f"Independent symbol for {name}",f"seed://symbols/{cid.lower()}",datetime(2027,7,1).date()))
 
 
 def seed_turnout_intervals(cur) -> None:
