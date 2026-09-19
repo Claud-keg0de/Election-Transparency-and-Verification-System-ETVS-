@@ -66,6 +66,8 @@ REQUIRED_COLUMNS = {
 REQUIRED_FKS = {
     "fk_candidate_position",
     "fk_candidate_party",
+    "fk_independent_symbol_candidate",
+    "fk_county_region_region",
     "fk_result_position",
     "fk_published_aggregate_position",
     "fk_audit_run_position",
