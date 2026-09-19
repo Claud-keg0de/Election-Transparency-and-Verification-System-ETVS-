@@ -27,6 +27,8 @@ from getpass import getpass
 import psycopg
 from psycopg.rows import dict_row
 
+from kenya_reference_data import COUNTIES, CONSTITUENCIES, REGIONS
+
 ELECTION_ID = "KE-PRES-2027"
 SOURCE_ID = "SRC-ETVS-SAMPLE"
 PUBLISHED_SOURCE_ID = "SRC-PUBLISHED-AGGREGATES"
@@ -95,6 +97,20 @@ def digest(*parts: object) -> str:
 
 def ensure_schema(cur) -> None:
     """Additive compatibility layer for databases created before this redesign."""
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS special_voting_areas (
+            special_voting_area_id TEXT PRIMARY KEY,
+            election_id TEXT NOT NULL REFERENCES elections(election_id),
+            area_code TEXT NOT NULL,
+            area_name TEXT NOT NULL,
+            voting_category TEXT NOT NULL CHECK (voting_category IN ('DIASPORA','PRISON')),
+            country_name TEXT,
+            source_document_id BIGINT,
+            notes TEXT,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE (election_id, area_code, country_name)
+        )
+    """)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS regions (
             region_id TEXT PRIMARY KEY,
