@@ -583,6 +583,11 @@ CREATE TABLE party_symbols (
 );
 
 
+CREATE UNIQUE INDEX uq_party_symbol_current
+    ON party_symbols(party_id)
+    WHERE effective_to IS NULL;
+
+
 CREATE TABLE candidates (
     candidate_id TEXT PRIMARY KEY,
 
