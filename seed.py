@@ -231,6 +231,10 @@ def ensure_schema(cur) -> None:
             observed_value TEXT, verification_method TEXT,
             source_document_id BIGINT REFERENCES source_documents(document_id) ON UPDATE CASCADE ON DELETE RESTRICT,
             source_reference TEXT UNIQUE,
+            CONSTRAINT fk_security_observation_station_election
+                FOREIGN KEY (polling_station_id,election_id)
+                REFERENCES polling_stations(polling_station_id,election_id)
+                ON UPDATE CASCADE ON DELETE RESTRICT,
             observed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
             created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
