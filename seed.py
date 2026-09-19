@@ -557,8 +557,8 @@ def seed_special_voting_areas(cur, source_document_id: int) -> None:
             code,
             country,
             country,
-            source_document_id,
-            "Historical 2022 IEBC reference; 2027 eligibility must come from the final 2027 legal/Gazette record.",
+            None,
+            "Historical 2022 IEBC reference from https://www.iebc.or.ke/uploads/resources/L7k6ob1bau.pdf ; 2027 eligibility must come from the final 2027 legal/Gazette record.",
         ))
 
     cur.execute("""
@@ -567,8 +567,8 @@ def seed_special_voting_areas(cur, source_document_id: int) -> None:
             voting_category,country_name,source_document_id,notes
         )
         VALUES(
-            'SVA-PRISONS',%s,'01451','Prisons','PRISON',NULL,%s,
-            'Historical 2022 IEBC reference: 7,483 registered voters across 103 prison polling stations. Complete station-level prison schedule is added only from the authoritative source.'
+            'SVA-PRISONS',%s,'01451','Prisons','PRISON',NULL,NULL,
+            'Historical 2022 IEBC reference from https://www.iebc.or.ke/uploads/resources/L7k6ob1bau.pdf : 7,483 registered voters across 103 prison polling stations. Complete station-level prison schedule is added only from the authoritative source.'
         )
         ON CONFLICT(special_voting_area_id) DO UPDATE SET
             area_code=EXCLUDED.area_code,
