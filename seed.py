@@ -30,6 +30,8 @@ from psycopg.rows import dict_row
 ELECTION_ID = "KE-PRES-2027"
 SOURCE_ID = "SRC-ETVS-SAMPLE"
 PUBLISHED_SOURCE_ID = "SRC-PUBLISHED-AGGREGATES"
+BALLOT_SPEC_SOURCE_ID = "SRC-IEBC-BALLOT-SPEC"
+BALLOT_SPEC_URI = "https://iebc.or.ke/uploads/tenders/5RfdjVjUmJ.pdf"
 POSITIONS = (
     ("POS-MCA", "Member of County Assembly", "MCA", "WARD", "WARD-MCA", 1),
     ("POS-MP", "Member of Parliament", "MP", "CONSTITUENCY", "CONST-MP", 2),
@@ -37,6 +39,31 @@ POSITIONS = (
     ("POS-SENATOR", "Senator", "SENATOR", "COUNTY", "COUNTY-SNT", 4),
     ("POS-GOVERNOR", "Governor", "GOVERNOR", "COUNTY", "COUNTY-GVN", 5),
     ("POS-PRESIDENT", "President", "PRESIDENT", "NATIONAL", "NATIONAL-PRES", 6),
+)
+
+# Source-backed ballot-paper fixture. These colours/codes are from an IEBC
+# ballot-paper standard and are stored as election-specific specifications.
+# The authoritative 2027 specification must replace these values if IEBC
+# publishes a different 2027 standard.
+BALLOT_SPECS = {
+    "POS-PRESIDENT": ("White", None),
+    "POS-MP": ("Green", "352 U"),
+    "POS-MCA": ("Brown", "481 U"),
+    "POS-SENATOR": ("Yellow", "3935 U"),
+    "POS-WOMEN-REP": ("Purple", "250 U"),
+    "POS-GOVERNOR": ("Sky Blue", "658 U"),
+}
+
+BALLOT_FEATURES = (
+    ("WATERMARK", "At least one generic watermark visible under normal light.", "NORMAL_LIGHT"),
+    ("UV", "UV-sensitive security feature including an IEBC logo/security mark.", "UV_LIGHT"),
+    ("ANTI_COPY", "Anti-copy security feature intended to reveal reproduction.", "PHOTOCOPY_OR_SCAN_TEST"),
+    ("GUILLOCHE", "Guilloche security pattern.", "VISUAL_INSPECTION"),
+    ("MICROTEXT", "Microtext security feature.", "MAGNIFIED_VISUAL_INSPECTION"),
+    ("SERIALIZATION", "Controlled ballot serialisation/tapered serialisation.", "SERIAL_RANGE_CHECK"),
+    ("EMBOSSMENT", "Embossed security feature where specified.", "TACTILE_INSPECTION"),
+    ("OFFICIAL_MARK", "Official Commission mark/stamp applied as required.", "VISUAL_INSPECTION"),
+    ("PAPER", "Smooth ballot paper free from specified visible defects.", "VISUAL_INSPECTION"),
 )
 
 
@@ -142,6 +169,82 @@ def ensure_schema(cur) -> None:
         )
     """)
     cur.execute("""
+        ALTER TABLE ballot_accounting_observations ADD COLUMN IF NOT EXISTS position_id TEXT
+    """)
+    cur.execute("""
+        ALTER TABLE ballot_accounting_observations ADD COLUMN IF NOT EXISTS turnout_observation_id BIGINT
+    """)
+    cur.execute("""
+        ALTER TABLE ballot_accounting_observations DROP CONSTRAINT IF EXISTS unique_ballot_observation_version
+    """)
+    cur.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_ballot_accounting_station_position_version
+        ON ballot_accounting_observations(election_id,polling_station_id,position_id,observation_version)
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS ballot_specifications (
+            ballot_specification_id TEXT PRIMARY KEY,
+            election_id TEXT NOT NULL REFERENCES elections(election_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+            position_id TEXT NOT NULL REFERENCES positions(position_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+            colour_name TEXT, colour_code TEXT, paper_description TEXT, paper_size TEXT, paper_finish TEXT,
+            counterfoil_required BOOLEAN NOT NULL DEFAULT TRUE, official_mark_required BOOLEAN NOT NULL DEFAULT TRUE,
+            source_document_id BIGINT REFERENCES source_documents(document_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(election_id,position_id)
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS ballot_security_features (
+            security_feature_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            ballot_specification_id TEXT NOT NULL REFERENCES ballot_specifications(ballot_specification_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+            feature_type TEXT NOT NULL, feature_code TEXT, description TEXT NOT NULL, verification_method TEXT,
+            required BOOLEAN NOT NULL DEFAULT TRUE,
+            source_document_id BIGINT REFERENCES source_documents(document_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(ballot_specification_id,feature_type)
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS ballot_stock_batches (
+            ballot_batch_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            election_id TEXT NOT NULL REFERENCES elections(election_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+            position_id TEXT NOT NULL REFERENCES positions(position_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+            ballot_specification_id TEXT NOT NULL REFERENCES ballot_specifications(ballot_specification_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+            polling_station_id TEXT, serial_start TEXT NOT NULL, serial_end TEXT NOT NULL,
+            quantity INTEGER NOT NULL CHECK(quantity > 0),
+            source_document_id BIGINT REFERENCES source_documents(document_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+            allocation_status TEXT NOT NULL DEFAULT 'ALLOCATED', notes TEXT,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(election_id,position_id,polling_station_id,serial_start,serial_end)
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS ballot_security_observations (
+            ballot_security_observation_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            election_id TEXT NOT NULL REFERENCES elections(election_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+            polling_station_id TEXT NOT NULL,
+            ballot_specification_id TEXT NOT NULL REFERENCES ballot_specifications(ballot_specification_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+            ballot_batch_id BIGINT REFERENCES ballot_stock_batches(ballot_batch_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+            security_feature_id BIGINT REFERENCES ballot_security_features(security_feature_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+            serial_number TEXT,
+            observed_status TEXT NOT NULL CHECK(observed_status IN('PASS','FAIL','NOT_VERIFIED','NOT_PRESENT')),
+            observed_value TEXT, verification_method TEXT,
+            source_document_id BIGINT REFERENCES source_documents(document_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+            source_reference TEXT UNIQUE,
+            CONSTRAINT fk_security_observation_station_election
+                FOREIGN KEY (polling_station_id,election_id)
+                REFERENCES polling_stations(polling_station_id,election_id)
+                ON UPDATE CASCADE ON DELETE RESTRICT,
+            observed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ballot_security_features_spec ON ballot_security_features(ballot_specification_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ballot_stock_batches_lookup ON ballot_stock_batches(election_id,position_id,polling_station_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ballot_security_observations_station ON ballot_security_observations(election_id,polling_station_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ballot_security_observations_serial ON ballot_security_observations(election_id,ballot_specification_id,serial_number)")
+
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS published_aggregate_totals (
             published_aggregate_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
             election_id TEXT NOT NULL REFERENCES elections(election_id), source_document_id BIGINT NOT NULL REFERENCES source_documents(document_id),
@@ -183,52 +286,72 @@ def seed_positions(cur) -> None:
         """,(pid,name,office,geo,code,seq))
 
 
-def seed_sources(cur) -> tuple[int,int]:
-    for sid,name in ((SOURCE_ID,"ETVS controlled sample source"),(PUBLISHED_SOURCE_ID,"Published aggregate comparison source")):
+def seed_sources(cur) -> tuple[int,int,int]:
+    for sid,name in ((SOURCE_ID,"ETVS controlled sample source"),(PUBLISHED_SOURCE_ID,"Published aggregate comparison source"),(BALLOT_SPEC_SOURCE_ID,"IEBC ballot-paper specification source")):
         cur.execute("""
             INSERT INTO sources(source_id,source_name,source_type,organization_name,description)
             VALUES(%s,%s,'OTHER','ETVS project','Controlled provenance source for the sample dataset.')
             ON CONFLICT(source_id) DO UPDATE SET source_name=EXCLUDED.source_name
         """,(sid,name))
     ids=[]
-    for sid,name in ((SOURCE_ID,"ETVS sample election observations"),(PUBLISHED_SOURCE_ID,"Published aggregate results comparison")):
+    for sid,name in ((SOURCE_ID,"ETVS sample election observations"),(PUBLISHED_SOURCE_ID,"Published aggregate results comparison"),(BALLOT_SPEC_SOURCE_ID,"IEBC ballot-paper standard reference")):
         h=digest("SOURCE",ELECTION_ID,sid,name)
+        uri = BALLOT_SPEC_URI if sid == BALLOT_SPEC_SOURCE_ID else "seed.py"
         row=cur.execute("""
             INSERT INTO source_documents(source_id,document_name,document_type,document_uri,content_hash)
-            VALUES(%s,%s,'SEEDED_DATASET','seed.py',%s)
-            ON CONFLICT(source_id,document_name,content_hash) DO UPDATE SET document_uri='seed.py'
+            VALUES(%s,%s,'SEEDED_DATASET',%s,%s)
+            ON CONFLICT(source_id,document_name,content_hash) DO UPDATE SET document_uri=EXCLUDED.document_uri
             RETURNING document_id
-        """,(sid,name,h)).fetchone()
+        """,(sid,name,uri,h)).fetchone()
         ids.append(int(row["document_id"]))
     return tuple(ids)
 
 
 def reset_sample(cur) -> None:
-    """Delete only the sample election in dependency order."""
-    for sql in (
-        "DELETE FROM source_comparisons WHERE election_id=%s",
+    """Reset the controlled sample and its derived audit history.
+
+    The audit hash chain is global. Removing findings from the middle of that
+    chain would make later verification fail, so a deterministic sample reset
+    clears the complete derived audit history before rebuilding the sample.
+    This function is intended for the controlled development/test database.
+    """
+    # The first six deletes clear the global derived audit chain and have no
+    # SQL parameters. All remaining deletes are scoped to the controlled sample.
+    global_deletes = (
+        "DELETE FROM source_comparisons",
+        "DELETE FROM audit_position_results",
+        "DELETE FROM audit_passed_results",
+        "DELETE FROM audit_failed_results",
+        "DELETE FROM audit_findings",
+        "DELETE FROM audit_runs",
+    )
+    for sql in global_deletes:
+        try: cur.execute(sql)
+        except psycopg.errors.UndefinedTable: pass
+
+    scoped_deletes = (
         "DELETE FROM submission_validation_results WHERE source_submission_id IN (SELECT source_submission_id FROM source_submissions WHERE election_id=%s)",
         "DELETE FROM source_submissions WHERE election_id=%s",
-        "DELETE FROM audit_position_results WHERE election_id=%s",
-        "DELETE FROM audit_passed_results WHERE election_id=%s",
-        "DELETE FROM audit_failed_results WHERE election_id=%s",
-        "DELETE FROM audit_findings WHERE election_id=%s",
-        "DELETE FROM audit_runs WHERE election_id=%s",
         "DELETE FROM result_submissions WHERE election_id=%s",
         "DELETE FROM published_aggregate_totals WHERE election_id=%s",
+        "DELETE FROM ballot_security_observations WHERE election_id=%s",
+        "DELETE FROM ballot_stock_batches WHERE election_id=%s",
+        "DELETE FROM ballot_security_features WHERE ballot_specification_id IN (SELECT ballot_specification_id FROM ballot_specifications WHERE election_id=%s)",
+        "DELETE FROM ballot_specifications WHERE election_id=%s",
         "DELETE FROM ballot_accounting_observations WHERE election_id=%s",
         "DELETE FROM registered_voter_observations WHERE election_id=%s",
         "DELETE FROM turnout_observations WHERE election_id=%s",
         "DELETE FROM polling_stations WHERE election_id=%s",
         "DELETE FROM candidates WHERE election_id=%s",
         "DELETE FROM elections WHERE election_id=%s",
-    ):
+    )
+    for sql in scoped_deletes:
         try: cur.execute(sql,(ELECTION_ID,))
         except psycopg.errors.UndefinedTable: pass
     for table,column,values in (("registration_centres","registration_centre_id",["RC001","RC002","RC003","RC004","RC005","RC006"]),("wards","ward_id",["W001","W002","W003","W004"]),("constituencies","constituency_id",["CON001","CON002"]),("counties","county_id",["COUNTY001"])):
         cur.execute(f"DELETE FROM {table} WHERE {column}=ANY(%s)",(values,))
-    cur.execute("DELETE FROM source_documents WHERE source_id IN (%s,%s)",(SOURCE_ID,PUBLISHED_SOURCE_ID))
-    cur.execute("DELETE FROM sources WHERE source_id IN (%s,%s)",(SOURCE_ID,PUBLISHED_SOURCE_ID))
+    cur.execute("DELETE FROM source_documents WHERE source_id IN (%s,%s,%s)",(SOURCE_ID,PUBLISHED_SOURCE_ID,BALLOT_SPEC_SOURCE_ID))
+    cur.execute("DELETE FROM sources WHERE source_id IN (%s,%s,%s)",(SOURCE_ID,PUBLISHED_SOURCE_ID,BALLOT_SPEC_SOURCE_ID))
 
 
 def seed_master_data(cur) -> None:
@@ -252,7 +375,95 @@ def seed_master_data(cur) -> None:
             cur.execute("""
                 INSERT INTO candidates(candidate_id,election_id,candidate_name,office,position_id)
                 VALUES(%s,%s,%s,%s,%s) ON CONFLICT(candidate_id) DO UPDATE SET candidate_name=EXCLUDED.candidate_name,office=EXCLUDED.office,position_id=EXCLUDED.position_id
-            """,(cid,ELECTION_ID,name,pname))
+            """,(cid,ELECTION_ID,name,pname,pid))
+
+
+def seed_ballot_security(cur, ballot_source_document_id:int) -> None:
+    """Seed one specification per contest plus controlled stock allocations."""
+    for pid, pname, office, _, ballot_code, _ in POSITIONS:
+        colour, colour_code = BALLOT_SPECS[pid]
+        spec_id = f"BS-{ELECTION_ID}-{pid}"
+        cur.execute("""
+            INSERT INTO ballot_specifications(
+                ballot_specification_id,election_id,position_id,colour_name,colour_code,
+                paper_description,paper_size,paper_finish,counterfoil_required,
+                official_mark_required,source_document_id
+            )
+            VALUES(%s,%s,%s,%s,%s,%s,%s,%s,TRUE,TRUE,%s)
+            ON CONFLICT(election_id,position_id) DO UPDATE SET
+                colour_name=EXCLUDED.colour_name,colour_code=EXCLUDED.colour_code,
+                paper_description=EXCLUDED.paper_description,
+                paper_size=EXCLUDED.paper_size,paper_finish=EXCLUDED.paper_finish,
+                counterfoil_required=EXCLUDED.counterfoil_required,
+                official_mark_required=EXCLUDED.official_mark_required,
+                source_document_id=EXCLUDED.source_document_id
+        """, (
+            spec_id,ELECTION_ID,pid,colour,colour_code,
+            "IEBC ballot-paper specification fixture; verify against the applicable election standard.",
+            "Election-specific", "Smooth; free from specified visible defects",
+            ballot_source_document_id
+        ))
+        spec_id = cur.execute("""
+            SELECT ballot_specification_id FROM ballot_specifications
+            WHERE election_id=%s AND position_id=%s
+        """,(ELECTION_ID,pid)).fetchone()["ballot_specification_id"]
+        for feature_type,description,method in BALLOT_FEATURES:
+            cur.execute("""
+                INSERT INTO ballot_security_features(
+                    ballot_specification_id,feature_type,description,verification_method,
+                    required,source_document_id
+                )
+                VALUES(%s,%s,%s,%s,TRUE,%s)
+                ON CONFLICT DO NOTHING
+            """,(spec_id,feature_type,description,method,ballot_source_document_id))
+
+        # Six polling stations receive independent serial ranges for each contest.
+        for n,s in enumerate(STATIONS,1):
+            start = n * 100000
+            end = start + s.registered - 1
+            cur.execute("""
+                INSERT INTO ballot_stock_batches(
+                    election_id,position_id,ballot_specification_id,polling_station_id,
+                    serial_start,serial_end,quantity,source_document_id,allocation_status,notes
+                )
+                VALUES(%s,%s,%s,%s,%s,%s,%s,%s,'ALLOCATED','ETVS controlled serial-range fixture')
+                ON CONFLICT DO NOTHING
+            """,(
+                ELECTION_ID,pid,spec_id,s.station_id,str(start),str(end),
+                s.registered,ballot_source_document_id
+            ))
+
+        # One PASS observation per required feature at every station, attached to
+        # the station's allocated batch. Serial-level observations are only seeded
+        # for serialization, avoiding a row for every physical ballot.
+        for s in STATIONS:
+            batch=cur.execute("""
+                SELECT ballot_batch_id FROM ballot_stock_batches
+                WHERE election_id=%s AND position_id=%s AND polling_station_id=%s
+            """,(ELECTION_ID,pid,s.station_id)).fetchone()
+            features=cur.execute("""
+                SELECT security_feature_id,feature_type FROM ballot_security_features
+                WHERE ballot_specification_id=%s ORDER BY security_feature_id
+            """,(spec_id,)).fetchall()
+            for feat in features:
+                serial = cur.execute("""
+                    SELECT serial_start FROM ballot_stock_batches WHERE ballot_batch_id=%s
+                """,(batch["ballot_batch_id"],)).fetchone()["serial_start"] if feat["feature_type"]=="SERIALIZATION" else None
+                cur.execute("""
+                    INSERT INTO ballot_security_observations(
+                        election_id,polling_station_id,ballot_specification_id,ballot_batch_id,
+                        security_feature_id,serial_number,observed_status,observed_value,
+                        verification_method,source_document_id,source_reference
+                    )
+                    VALUES(%s,%s,%s,%s,%s,%s,'PASS',%s,%s,%s,%s)
+                    ON CONFLICT DO NOTHING
+                """,(
+                    ELECTION_ID,s.station_id,spec_id,batch["ballot_batch_id"],
+                    feat["security_feature_id"],serial,
+                    ("Green" if s.station_id=="PS006" and pid=="POS-PRESIDENT" else colour) if feat["feature_type"]=="PAPER" else "Expected security feature present in controlled fixture",
+                    "ETVS fixture verification",ballot_source_document_id,
+                    f"SEED-BALLOT-SECURITY-{s.station_id}-{pid}-{feat['feature_type']}"
+                ))
 
 
 def seed_observations(cur,source_document_id:int) -> None:
@@ -311,7 +522,7 @@ def seed_results(cur,source_document_id:int)->None:
                     h=digest("RESULT",ELECTION_ID,s.station_id,cid,version,final)
                     cur.execute("""
                         INSERT INTO result_submissions(election_id,polling_station_id,candidate_id,result_version,votes,position_id,submission_hash,source_document_id,source_reference,observed_at)
-                        VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                        VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                         ON CONFLICT(election_id,polling_station_id,candidate_id,result_version) DO UPDATE SET votes=EXCLUDED.votes,position_id=EXCLUDED.position_id,
                         submission_hash=EXCLUDED.submission_hash,source_document_id=EXCLUDED.source_document_id,source_reference=EXCLUDED.source_reference,observed_at=EXCLUDED.observed_at
                     """,(ELECTION_ID,s.station_id,cid,version,final,pid,h,source_document_id,f"SEED-RESULT-{s.station_id}-{pid}-V{version}",when))
@@ -368,7 +579,7 @@ def seed_published_aggregates(cur,source_document_id:int)->None:
 
 def check(cur)->None:
     print("\nETVS SEED VERIFICATION\n"+"="*82)
-    tables=("positions","elections","counties","constituencies","wards","registration_centres","polling_stations","registered_voter_observations","turnout_observations","ballot_accounting_observations","candidates","result_submissions","published_aggregate_totals","audit_runs","audit_findings")
+    tables=("positions","elections","counties","constituencies","wards","registration_centres","polling_stations","registered_voter_observations","turnout_observations","ballot_accounting_observations","ballot_specifications","ballot_security_features","ballot_stock_batches","ballot_security_observations","candidates","result_submissions","published_aggregate_totals","audit_runs","audit_findings")
     for table in tables:
         try: print(f"{table:38}{cur.execute(f'SELECT COUNT(*) AS n FROM {table}').fetchone()['n']:>7}")
         except psycopg.errors.UndefinedTable: print(f"{table:38} MISSING")
@@ -394,7 +605,7 @@ def main()->int:
             with conn.cursor() as cur:
                 ensure_schema(cur)
                 if a.reset:reset_sample(cur)
-                seed_positions(cur);source_doc,published_doc=seed_sources(cur);seed_master_data(cur);seed_observations(cur,source_doc);seed_results(cur,source_doc);seed_published_aggregates(cur,published_doc);ensure_reporting_views(cur);check(cur)
+                seed_positions(cur);source_doc,published_doc,ballot_doc=seed_sources(cur);seed_master_data(cur);seed_ballot_security(cur,ballot_doc);seed_observations(cur,source_doc);seed_results(cur,source_doc);seed_published_aggregates(cur,published_doc);ensure_reporting_views(cur);check(cur)
             conn.commit()
         print("\nSEED SUCCESS: PostgreSQL data committed successfully.");return 0
     except Exception as exc:print(f"\nSEED FAILED: {exc}");return 1
