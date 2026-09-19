@@ -1015,7 +1015,7 @@ CREATE INDEX idx_candidate_area_lookup
 CREATE OR REPLACE FUNCTION validate_candidate_electoral_area()
 RETURNS trigger
 LANGUAGE plpgsql
-AS $
+AS $etvs$
 DECLARE
     expected_geography TEXT;
     candidate_position TEXT;
@@ -1065,7 +1065,7 @@ BEGIN
 
     RETURN NEW;
 END;
-$;
+$etvs$;
 
 CREATE TRIGGER trg_validate_candidate_electoral_area
 BEFORE INSERT OR UPDATE ON candidate_electoral_areas
@@ -1443,7 +1443,7 @@ CREATE TABLE result_submissions (
 CREATE OR REPLACE FUNCTION validate_result_candidate_electoral_area()
 RETURNS trigger
 LANGUAGE plpgsql
-AS $
+AS $etvs$
 DECLARE
     station_area_type TEXT;
     station_area_id TEXT;
@@ -1497,7 +1497,7 @@ BEGIN
 
     RETURN NEW;
 END;
-$;
+$etvs$;
 
 CREATE TRIGGER trg_validate_result_candidate_electoral_area
 BEFORE INSERT OR UPDATE ON result_submissions
