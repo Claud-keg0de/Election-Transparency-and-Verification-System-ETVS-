@@ -217,19 +217,6 @@ def ensure_schema(cur) -> None:
             election_level TEXT NOT NULL, geography_level TEXT NOT NULL
         )
     """)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS special_area_contest_rules (
-            special_area_contest_rule_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-            special_voting_area_id TEXT NOT NULL REFERENCES special_voting_areas(special_voting_area_id),
-            position_id TEXT NOT NULL REFERENCES positions(position_id),
-            reference_year INTEGER NOT NULL,
-            eligibility_status TEXT NOT NULL CHECK (eligibility_status IN ('ALLOWED','NOT_ELIGIBLE')),
-            source_document_id BIGINT REFERENCES source_documents(document_id),
-            notes TEXT,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE (special_voting_area_id, position_id, reference_year)
-        )
-    """)
     for table in ("turnout_observations", "ballot_accounting_observations", "result_submissions"):
         cur.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS source_document_id BIGINT")
         cur.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS observed_at TIMESTAMPTZ")
@@ -278,6 +265,19 @@ def ensure_schema(cur) -> None:
             retrieved_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
             created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
             UNIQUE (source_id,document_name,content_hash)
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS special_area_contest_rules (
+            special_area_contest_rule_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            special_voting_area_id TEXT NOT NULL REFERENCES special_voting_areas(special_voting_area_id),
+            position_id TEXT NOT NULL REFERENCES positions(position_id),
+            reference_year INTEGER NOT NULL,
+            eligibility_status TEXT NOT NULL CHECK (eligibility_status IN ('ALLOWED','NOT_ELIGIBLE')),
+            source_document_id BIGINT REFERENCES source_documents(document_id),
+            notes TEXT,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE (special_voting_area_id, position_id, reference_year)
         )
     """)
     cur.execute("""
