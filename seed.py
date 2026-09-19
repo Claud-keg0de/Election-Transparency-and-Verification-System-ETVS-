@@ -27,6 +27,8 @@ from getpass import getpass
 import psycopg
 from psycopg.rows import dict_row
 
+from kenya_reference_data import COUNTIES, CONSTITUENCIES, DIASPORA_STATIONS_2022, PRISON_STATIONS_2022, REGIONS
+
 ELECTION_ID = "KE-PRES-2027"
 SOURCE_ID = "SRC-ETVS-SAMPLE"
 PUBLISHED_SOURCE_ID = "SRC-PUBLISHED-AGGREGATES"
@@ -47,15 +49,16 @@ class StationSeed:
     centre_id: str
     registered: int
     turnout: int
+    turnout_interval_minutes: int
 
 
 STATIONS = (
-    StationSeed("PS001", "PS-001", "RC001", 1000, 700),
-    StationSeed("PS002", "PS-002", "RC002", 800, 500),
-    StationSeed("PS003", "PS-003", "RC003", 950, 1000),  # R001 anomaly
-    StationSeed("PS004", "PS-004", "RC004", 1200, 900),
-    StationSeed("PS005", "PS-005", "RC005", 600, 450),
-    StationSeed("PS006", "PS-006", "RC006", 700, 650),
+    StationSeed("PS001", "PS-001", "RC001", 1000, 700, 15),
+    StationSeed("PS002", "PS-002", "RC002", 800, 500, 30),
+    StationSeed("PS003", "PS-003", "RC003", 950, 1000, 60),  # R001 anomaly
+    StationSeed("PS004", "PS-004", "RC004", 1200, 900, 20),
+    StationSeed("PS005", "PS-005", "RC005", 600, 450, 45),
+    StationSeed("PS006", "PS-006", "RC006", 700, 650, 120),
 )
 
 # Each tuple is (valid, rejected, spoilt) for every contest at that station.
@@ -95,6 +98,108 @@ def digest(*parts: object) -> str:
 def ensure_schema(cur) -> None:
     """Additive compatibility layer for databases created before this redesign."""
     cur.execute("""
+        CREATE TABLE IF NOT EXISTS special_voting_areas (
+            special_voting_area_id TEXT PRIMARY KEY,
+            election_id TEXT NOT NULL REFERENCES elections(election_id),
+            area_code TEXT NOT NULL,
+            area_name TEXT NOT NULL,
+            voting_category TEXT NOT NULL CHECK (voting_category IN ('DIASPORA','PRISON')),
+            country_name TEXT,
+            source_document_id BIGINT,
+            notes TEXT,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE (election_id, area_code, country_name)
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS regions (
+            region_id TEXT PRIMARY KEY,
+            region_name TEXT NOT NULL UNIQUE,
+            region_type TEXT NOT NULL DEFAULT 'FORMER_PROVINCE'
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS county_region_assignments (
+            county_id TEXT PRIMARY KEY,
+            region_id TEXT NOT NULL REFERENCES regions(region_id),
+            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS political_parties (
+            party_id TEXT PRIMARY KEY,
+            party_name TEXT NOT NULL UNIQUE,
+            party_abbreviation TEXT UNIQUE,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS party_symbols (
+            party_symbol_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            party_id TEXT NOT NULL REFERENCES political_parties(party_id),
+            symbol_name TEXT NOT NULL,
+            symbol_uri TEXT,
+            approved BOOLEAN NOT NULL DEFAULT TRUE,
+            effective_from DATE,
+            effective_to DATE,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE (party_id, symbol_name)
+        )
+    """)
+    cur.execute("ALTER TABLE polling_stations ADD COLUMN IF NOT EXISTS special_voting_area_id TEXT")
+    cur.execute("ALTER TABLE polling_stations ADD COLUMN IF NOT EXISTS location_type TEXT NOT NULL DEFAULT 'NORMAL'")
+    cur.execute("ALTER TABLE polling_stations ALTER COLUMN registration_centre_id DROP NOT NULL")
+    cur.execute("""
+        DO $
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conname='fk_polling_station_special_area'
+            ) THEN
+                ALTER TABLE polling_stations
+                ADD CONSTRAINT fk_polling_station_special_area
+                FOREIGN KEY (special_voting_area_id)
+                REFERENCES special_voting_areas(special_voting_area_id)
+                ON UPDATE CASCADE ON DELETE RESTRICT;
+            END IF;
+        END $;
+    """)
+
+    cur.execute("ALTER TABLE candidates ADD COLUMN IF NOT EXISTS candidate_type TEXT NOT NULL DEFAULT 'PARTY'")
+    cur.execute("ALTER TABLE candidates ADD COLUMN IF NOT EXISTS party_id TEXT")
+    # Candidate affiliation constraints are added after the deterministic sample
+    # candidates have been refreshed below, so legacy rows are not stranded.
+    cur.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_party_symbol_current
+        ON party_symbols(party_id)
+        WHERE effective_to IS NULL
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS independent_candidate_symbols (
+            independent_symbol_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            candidate_id TEXT NOT NULL UNIQUE,
+            election_id TEXT NOT NULL,
+            symbol_name TEXT NOT NULL,
+            symbol_uri TEXT,
+            approved BOOLEAN NOT NULL DEFAULT TRUE,
+            approved_at TIMESTAMPTZ,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE (candidate_id, election_id)
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_independent_symbols_candidate ON independent_candidate_symbols(candidate_id,election_id)")
+    cur.execute("""
+        DO $ BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='fk_independent_symbol_candidate') THEN
+                ALTER TABLE independent_candidate_symbols
+                ADD CONSTRAINT fk_independent_symbol_candidate
+                FOREIGN KEY (candidate_id, election_id)
+                REFERENCES candidates(candidate_id, election_id)
+                ON UPDATE CASCADE ON DELETE RESTRICT;
+            END IF;
+        END $;
+    """)
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS registered_voter_observations (
             registered_voter_observation_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
             election_id TEXT NOT NULL REFERENCES elections(election_id),
@@ -122,6 +227,27 @@ def ensure_schema(cur) -> None:
     cur.execute("ALTER TABLE result_submissions ADD COLUMN IF NOT EXISTS observed_at TIMESTAMPTZ")
     cur.execute("ALTER TABLE positions ADD COLUMN IF NOT EXISTS ballot_code TEXT")
     cur.execute("ALTER TABLE positions ADD COLUMN IF NOT EXISTS observation_sequence INTEGER")
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS turnout_reporting_intervals (
+            turnout_interval_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            election_id TEXT NOT NULL REFERENCES elections(election_id),
+            polling_station_id TEXT NOT NULL REFERENCES polling_stations(polling_station_id),
+            interval_minutes INTEGER NOT NULL CHECK (interval_minutes > 0),
+            effective_from TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            effective_to TIMESTAMPTZ,
+            reporting_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE (election_id, polling_station_id, effective_from),
+            CHECK (effective_to IS NULL OR effective_to > effective_from)
+        )
+    """)
+    cur.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_turnout_interval_current
+        ON turnout_reporting_intervals(election_id, polling_station_id)
+        WHERE effective_to IS NULL
+    """)
+    cur.execute("ALTER TABLE turnout_observations ADD COLUMN IF NOT EXISTS interval_configuration_id BIGINT")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_turnout_interval_configuration ON turnout_observations(interval_configuration_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_registered_latest ON registered_voter_observations(election_id,polling_station_id,observation_version DESC)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_ballot_latest_position ON ballot_accounting_observations(election_id,polling_station_id,position_id,observation_version DESC)")
     cur.execute("""
@@ -139,6 +265,19 @@ def ensure_schema(cur) -> None:
             retrieved_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
             created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
             UNIQUE (source_id,document_name,content_hash)
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS special_area_contest_rules (
+            special_area_contest_rule_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            special_voting_area_id TEXT NOT NULL REFERENCES special_voting_areas(special_voting_area_id),
+            position_id TEXT NOT NULL REFERENCES positions(position_id),
+            reference_year INTEGER NOT NULL,
+            eligibility_status TEXT NOT NULL CHECK (eligibility_status IN ('ALLOWED','NOT_ELIGIBLE')),
+            source_document_id BIGINT REFERENCES source_documents(document_id),
+            notes TEXT,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE (special_voting_area_id, position_id, reference_year)
         )
     """)
     cur.execute("""
@@ -219,12 +358,19 @@ def reset_sample(cur) -> None:
         "DELETE FROM ballot_accounting_observations WHERE election_id=%s",
         "DELETE FROM registered_voter_observations WHERE election_id=%s",
         "DELETE FROM turnout_observations WHERE election_id=%s",
+        "DELETE FROM turnout_reporting_intervals WHERE election_id=%s",
         "DELETE FROM polling_stations WHERE election_id=%s",
+        "DELETE FROM independent_candidate_symbols WHERE election_id=%s",
         "DELETE FROM candidates WHERE election_id=%s",
+        "DELETE FROM special_area_contest_rules WHERE special_voting_area_id IN (SELECT special_voting_area_id FROM special_voting_areas WHERE election_id=%s)",
+        "DELETE FROM special_voting_areas WHERE election_id=%s",
         "DELETE FROM elections WHERE election_id=%s",
     ):
         try: cur.execute(sql,(ELECTION_ID,))
         except psycopg.errors.UndefinedTable: pass
+    cur.execute("DELETE FROM party_symbols WHERE party_id IN ('PTY-ALPHA','PTY-BETA')")
+    cur.execute("DELETE FROM political_parties WHERE party_id IN ('PTY-ALPHA','PTY-BETA')")
+    cur.execute("DELETE FROM county_region_assignments WHERE county_id='COUNTY001'")
     for table,column,values in (("registration_centres","registration_centre_id",["RC001","RC002","RC003","RC004","RC005","RC006"]),("wards","ward_id",["W001","W002","W003","W004"]),("constituencies","constituency_id",["CON001","CON002"]),("counties","county_id",["COUNTY001"])):
         cur.execute(f"DELETE FROM {table} WHERE {column}=ANY(%s)",(values,))
     cur.execute("DELETE FROM source_documents WHERE source_id IN (%s,%s)",(SOURCE_ID,PUBLISHED_SOURCE_ID))
@@ -232,27 +378,336 @@ def reset_sample(cur) -> None:
 
 
 def seed_master_data(cur) -> None:
-    cur.execute("INSERT INTO elections(election_id,election_name,election_date,status) VALUES(%s,'ETVS Sample Election 2027','2027-08-10','ACTIVE') ON CONFLICT DO NOTHING",(ELECTION_ID,))
-    cur.execute("INSERT INTO counties(county_id,county_name) VALUES('COUNTY001','Sample County') ON CONFLICT DO NOTHING")
-    for cid,name in (("CON001","Greenfield Constituency"),("CON002","Riverdale Constituency")):
-        cur.execute("INSERT INTO constituencies(constituency_id,constituency_name,county_id) VALUES(%s,%s,'COUNTY001') ON CONFLICT DO NOTHING",(cid,name))
-    wards=(("W001","Greenfield Central","CON001"),("W002","Greenfield East","CON001"),("W003","Riverdale Central","CON002"),("W004","Riverdale East","CON002"))
-    for wid,name,cid in wards:cur.execute("INSERT INTO wards(ward_id,ward_name,constituency_id) VALUES(%s,%s,%s) ON CONFLICT DO NOTHING",(wid,name,cid))
-    centres=(("RC001","Greenfield Primary School","W001"),("RC002","Greenfield Community Hall","W002"),("RC003","Greenfield Secondary School","W001"),("RC004","Riverdale Primary School","W003"),("RC005","Riverdale Community Hall","W004"),("RC006","Riverdale Secondary School","W003"))
-    for rid,name,wid in centres:cur.execute("INSERT INTO registration_centres(registration_centre_id,registration_centre_name,ward_id) VALUES(%s,%s,%s) ON CONFLICT DO NOTHING",(rid,name,wid))
+    # Hard-coded national reference geography for the current ETVS phase.
+    for rid, name in REGIONS.items():
+        cur.execute("""
+            INSERT INTO regions(region_id, region_name, region_type)
+            VALUES(%s,%s,'FORMER_PROVINCE')
+            ON CONFLICT(region_id) DO UPDATE SET region_name=EXCLUDED.region_name
+        """, (rid,name))
+
+    for county_id, county_code, county_name, region_id in COUNTIES:
+        cur.execute("""
+            INSERT INTO counties(county_id,county_name)
+            VALUES(%s,%s)
+            ON CONFLICT(county_id) DO UPDATE SET county_name=EXCLUDED.county_name
+        """, (county_id,county_name))
+        cur.execute("""
+            INSERT INTO county_region_assignments(county_id,region_id)
+            VALUES(%s,%s)
+            ON CONFLICT(county_id) DO UPDATE SET region_id=EXCLUDED.region_id
+        """, (county_id,region_id))
+
+    county_by_code={code:cid for cid,code,_,_ in COUNTIES}
+    for number,name,county_code in CONSTITUENCIES:
+        county_id=county_by_code[county_code]
+        constituency_id=f"KE-C{number:03d}"
+        cur.execute("""
+            INSERT INTO constituencies(constituency_id,constituency_name,county_id)
+            VALUES(%s,%s,%s)
+            ON CONFLICT(constituency_id) DO UPDATE SET constituency_name=EXCLUDED.constituency_name,
+                county_id=EXCLUDED.county_id
+        """, (constituency_id,name,county_id))
+
+    cur.execute("""
+        INSERT INTO elections(election_id,election_name,election_date,status)
+        VALUES(%s,'ETVS Sample Election 2027','2027-08-10','ACTIVE')
+        ON CONFLICT DO NOTHING
+    """, (ELECTION_ID,))
+
+    # Controlled test wards use real Trans Nzoia constituencies.
+    wards=(
+        ("W001","Keiyo","KE-C136"),
+        ("W002","Bidii","KE-C136"),
+        ("W003","Endebess","KE-C137"),
+        ("W004","Matumbei","KE-C137"),
+    )
+    for wid,name,cid in wards:
+        cur.execute("""
+            INSERT INTO wards(ward_id,ward_name,constituency_id)
+            VALUES(%s,%s,%s)
+            ON CONFLICT(ward_id) DO UPDATE SET ward_name=EXCLUDED.ward_name,
+                constituency_id=EXCLUDED.constituency_id
+        """, (wid,name,cid))
+
+    cur.execute("""
+        INSERT INTO political_parties(party_id,party_name,party_abbreviation)
+        VALUES('PTY-ALPHA','Civic Renewal Party','CRP'),
+              ('PTY-BETA','National Development Party','NDP')
+        ON CONFLICT(party_id) DO UPDATE SET party_name=EXCLUDED.party_name,
+            party_abbreviation=EXCLUDED.party_abbreviation
+    """)
+    cur.execute("""
+        INSERT INTO party_symbols(party_id,symbol_name,symbol_uri,approved)
+        VALUES('PTY-ALPHA','Rising Sun','seed://symbols/crp-rising-sun',TRUE),
+              ('PTY-BETA','Open Book','seed://symbols/ndp-open-book',TRUE)
+        ON CONFLICT(party_id,symbol_name) DO UPDATE SET symbol_uri=EXCLUDED.symbol_uri,
+            approved=EXCLUDED.approved
+    """)
+
+    centres=(
+        ("RC001","Greenfield Primary School","W001"),
+        ("RC002","Greenfield Community Hall","W002"),
+        ("RC003","Greenfield Secondary School","W001"),
+        ("RC004","Riverdale Primary School","W003"),
+        ("RC005","Riverdale Community Hall","W004"),
+        ("RC006","Riverdale Secondary School","W003"),
+    )
+    for rid,name,wid in centres:
+        cur.execute("""
+            INSERT INTO registration_centres(registration_centre_id,registration_centre_name,ward_id)
+            VALUES(%s,%s,%s)
+            ON CONFLICT(registration_centre_id) DO UPDATE SET registration_centre_name=EXCLUDED.registration_centre_name,
+                ward_id=EXCLUDED.ward_id
+        """, (rid,name,wid))
+
     for s in STATIONS:
         cur.execute("""
-            INSERT INTO polling_stations(polling_station_id,election_id,registration_centre_id,polling_station_code,registered_voters)
-            VALUES(%s,%s,%s,%s,%s) ON CONFLICT(polling_station_id) DO UPDATE SET election_id=EXCLUDED.election_id,
-            registration_centre_id=EXCLUDED.registration_centre_id,polling_station_code=EXCLUDED.polling_station_code,registered_voters=EXCLUDED.registered_voters
-        """,(s.station_id,ELECTION_ID,s.centre_id,s.code,s.registered))
+            INSERT INTO polling_stations(
+                polling_station_id,election_id,registration_centre_id,special_voting_area_id,
+                location_type,polling_station_code,registered_voters
+            )
+            VALUES(%s,%s,%s,NULL,'NORMAL',%s,%s)
+            ON CONFLICT(polling_station_id) DO UPDATE SET
+                election_id=EXCLUDED.election_id,
+                registration_centre_id=EXCLUDED.registration_centre_id,
+                special_voting_area_id=NULL,
+                location_type='NORMAL',
+                polling_station_code=EXCLUDED.polling_station_code,
+                registered_voters=EXCLUDED.registered_voters
+        """, (s.station_id,ELECTION_ID,s.centre_id,s.code,s.registered))
+
     for pid,pname,_,_,_,_ in POSITIONS:
         for n,name in ((1,"Amina Njeri"),(2,"Brian Wanyonyi"),(3,"David Mwangi")):
             cid=f"{pid}-C{n:03d}"
+            candidate_type='INDEPENDENT' if n==3 else 'PARTY'
+            party_id=None if n==3 else ('PTY-ALPHA' if n==1 else 'PTY-BETA')
             cur.execute("""
-                INSERT INTO candidates(candidate_id,election_id,candidate_name,office,position_id)
-                VALUES(%s,%s,%s,%s,%s) ON CONFLICT(candidate_id) DO UPDATE SET candidate_name=EXCLUDED.candidate_name,office=EXCLUDED.office,position_id=EXCLUDED.position_id
-            """,(cid,ELECTION_ID,name,pname))
+                INSERT INTO candidates(candidate_id,election_id,candidate_name,office,position_id,candidate_type,party_id)
+                VALUES(%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT(candidate_id) DO UPDATE SET candidate_name=EXCLUDED.candidate_name,
+                    office=EXCLUDED.office,position_id=EXCLUDED.position_id,
+                    candidate_type=EXCLUDED.candidate_type,party_id=EXCLUDED.party_id
+            """, (cid,ELECTION_ID,name,pname,pid,candidate_type,party_id))
+            if candidate_type=='INDEPENDENT':
+                cur.execute("""
+                    INSERT INTO independent_candidate_symbols(
+                        candidate_id,election_id,symbol_name,symbol_uri,approved,approved_at
+                    )
+                    VALUES(%s,%s,%s,%s,TRUE,%s)
+                    ON CONFLICT(candidate_id) DO UPDATE SET
+                        election_id=EXCLUDED.election_id,symbol_name=EXCLUDED.symbol_name,
+                        symbol_uri=EXCLUDED.symbol_uri,approved=EXCLUDED.approved,
+                        approved_at=EXCLUDED.approved_at
+                """, (cid,ELECTION_ID,f"Independent symbol for {name}",
+                      f"seed://symbols/{cid.lower()}",datetime(2027,7,1).date()))
+
+    cur.execute("""
+        DO $ BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='fk_candidate_party') THEN
+                ALTER TABLE candidates ADD CONSTRAINT fk_candidate_party
+                FOREIGN KEY (party_id) REFERENCES political_parties(party_id)
+                ON UPDATE CASCADE ON DELETE RESTRICT;
+            END IF;
+            IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='candidate_type_check') THEN
+                ALTER TABLE candidates ADD CONSTRAINT candidate_type_check
+                CHECK (candidate_type IN ('PARTY','INDEPENDENT'));
+            END IF;
+            IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='candidate_party_affiliation_check') THEN
+                ALTER TABLE candidates ADD CONSTRAINT candidate_party_affiliation_check
+                CHECK ((candidate_type='PARTY' AND party_id IS NOT NULL)
+                    OR (candidate_type='INDEPENDENT' AND party_id IS NULL));
+            END IF;
+        END $;
+    """)
+
+
+def seed_special_voting_areas(cur, source_document_id: int) -> None:
+    """Seed historical 2022 special-voting reference areas and station rows.
+
+    These records are historical reference data. They are not treated as
+    2027 contest eligibility.
+    """
+    country_codes = {
+        "Tanzania": "05000",
+        "Uganda": "05001",
+        "Rwanda": "05002",
+        "Burundi": "05003",
+        "South Africa": "05004",
+        "South Sudan": "05005",
+        "Germany": "05006",
+        "United Kingdom": "05007",
+        "Qatar": "05008",
+        "United Arab Emirates": "05009",
+        "Canada": "05010",
+        "United States of America": "05011",
+    }
+
+    for country in dict.fromkeys(country for _, country, _, _ in DIASPORA_STATIONS_2022):
+        code = country_codes[country]
+        cur.execute("""
+            INSERT INTO special_voting_areas(
+                special_voting_area_id,election_id,area_code,area_name,
+                voting_category,country_name,source_document_id,notes
+            )
+            VALUES(%s,%s,%s,%s,'DIASPORA',%s,NULL,%s)
+            ON CONFLICT(special_voting_area_id) DO UPDATE SET
+                area_code=EXCLUDED.area_code,
+                area_name=EXCLUDED.area_name,
+                voting_category=EXCLUDED.voting_category,
+                country_name=EXCLUDED.country_name,
+                source_document_id=NULL,
+                notes=EXCLUDED.notes
+        """, (
+            f"SVA-DIA-{code}",
+            ELECTION_ID,
+            code,
+            country,
+            country,
+            "Historical 2022 IEBC reference from https://www.iebc.or.ke/uploads/resources/L7k6ob1bau.pdf ; 2027 eligibility must come from the final 2027 legal/Gazette record.",
+        ))
+
+    cur.execute("""
+        INSERT INTO special_voting_areas(
+            special_voting_area_id,election_id,area_code,area_name,
+            voting_category,country_name,source_document_id,notes
+        )
+        VALUES(
+            'SVA-PRISONS',%s,'01451','Prisons','PRISON',NULL,NULL,
+            'Historical 2022 IEBC Gazette reference from https://www.iebc.or.ke/uploads/resources/L7k6ob1bau.pdf : 7,483 registered voters across 106 Gazette polling-station rows. An IEBC polling-day press update separately referred to 103 prison polling stations; ETVS preserves this source discrepancy.'
+        )
+        ON CONFLICT(special_voting_area_id) DO UPDATE SET
+            area_code=EXCLUDED.area_code,
+            area_name=EXCLUDED.area_name,
+            voting_category=EXCLUDED.voting_category,
+            country_name=EXCLUDED.country_name,
+            source_document_id=NULL,
+            notes=EXCLUDED.notes
+    """)
+
+    cur.execute("""
+        DELETE FROM polling_stations
+        WHERE election_id=%s
+          AND location_type='SPECIAL'
+          AND (polling_station_id LIKE 'PS-DIA-%%' OR polling_station_id LIKE 'PS-PRISON-%%')
+    """, (ELECTION_ID,))
+
+    for index, (station_code, country, station_name, registered) in enumerate(DIASPORA_STATIONS_2022, 1):
+        area_id = f"SVA-DIA-{country_codes[country]}"
+        station_id = f"PS-DIA-{index:03d}"
+        cur.execute("""
+            INSERT INTO polling_stations(
+                polling_station_id,election_id,registration_centre_id,
+                special_voting_area_id,location_type,polling_station_code,
+                registered_voters
+            )
+            VALUES(%s,%s,NULL,%s,'SPECIAL',%s,%s)
+            ON CONFLICT(polling_station_id) DO UPDATE SET
+                election_id=EXCLUDED.election_id,
+                registration_centre_id=NULL,
+                special_voting_area_id=EXCLUDED.special_voting_area_id,
+                location_type='SPECIAL',
+                polling_station_code=EXCLUDED.polling_station_code,
+                registered_voters=EXCLUDED.registered_voters
+        """, (station_id, ELECTION_ID, area_id, station_code, registered))
+        cur.execute("""
+            INSERT INTO turnout_reporting_intervals(
+                election_id,polling_station_id,interval_minutes,effective_from,
+                effective_to,reporting_enabled
+            )
+            VALUES(%s,%s,60,%s,NULL,FALSE)
+            ON CONFLICT(election_id,polling_station_id,effective_from) DO UPDATE SET
+                interval_minutes=EXCLUDED.interval_minutes,
+                effective_to=NULL,
+                reporting_enabled=FALSE
+        """, (ELECTION_ID, station_id, datetime(2022, 8, 9, 5, 0, tzinfo=timezone.utc)))
+
+    for index, (centre_code, station_name, registered) in enumerate(PRISON_STATIONS_2022, 1):
+        occurrence = 2 if sum(1 for code, _, _ in PRISON_STATIONS_2022[:index] if code == centre_code) == 2 else 1
+        station_code = f"0492921451{centre_code}{occurrence:02d}"
+        station_id = f"PS-PRISON-{index:03d}"
+        cur.execute("""
+            INSERT INTO polling_stations(
+                polling_station_id,election_id,registration_centre_id,
+                special_voting_area_id,location_type,polling_station_code,
+                registered_voters
+            )
+            VALUES(%s,%s,NULL,'SVA-PRISONS','SPECIAL',%s,%s)
+            ON CONFLICT(polling_station_id) DO UPDATE SET
+                election_id=EXCLUDED.election_id,
+                registration_centre_id=NULL,
+                special_voting_area_id='SVA-PRISONS',
+                location_type='SPECIAL',
+                polling_station_code=EXCLUDED.polling_station_code,
+                registered_voters=EXCLUDED.registered_voters
+        """, (station_id, ELECTION_ID, station_code, registered))
+        cur.execute("""
+            INSERT INTO turnout_reporting_intervals(
+                election_id,polling_station_id,interval_minutes,effective_from,
+                effective_to,reporting_enabled
+            )
+            VALUES(%s,%s,60,%s,NULL,FALSE)
+            ON CONFLICT(election_id,polling_station_id,effective_from) DO UPDATE SET
+                interval_minutes=EXCLUDED.interval_minutes,
+                effective_to=NULL,
+                reporting_enabled=FALSE
+        """, (ELECTION_ID, station_id, datetime(2022, 8, 9, 5, 0, tzinfo=timezone.utc)))
+
+
+def seed_special_area_contest_rules(cur) -> None:
+    """Record historical 2022 special-area contest eligibility separately.
+
+    Both diaspora and prison voters are recorded as presidential-only for the
+    2022 historical reference. These rows are explicitly keyed to 2022 and do
+    not authorize the 2027 sample election.
+    """
+    area_ids = [
+        r["special_voting_area_id"]
+        for r in cur.execute("""
+            SELECT special_voting_area_id
+            FROM special_voting_areas
+            WHERE election_id=%s
+            ORDER BY special_voting_area_id
+        """, (ELECTION_ID,)).fetchall()
+    ]
+    for area_id in area_ids:
+        for position_id, *_ in POSITIONS:
+            status = "ALLOWED" if position_id == "POS-PRESIDENT" else "NOT_ELIGIBLE"
+            cur.execute("""
+                INSERT INTO special_area_contest_rules(
+                    special_voting_area_id,position_id,reference_year,
+                    eligibility_status,source_document_id,notes
+                )
+                VALUES(%s,%s,2022,%s,NULL,%s)
+                ON CONFLICT(special_voting_area_id,position_id,reference_year)
+                DO UPDATE SET eligibility_status=EXCLUDED.eligibility_status,
+                              source_document_id=NULL,
+                              notes=EXCLUDED.notes
+            """, (
+                area_id,
+                position_id,
+                status,
+                "Historical 2022 IEBC reference; presidential-only special voting rule. "
+                "This does not determine 2027 eligibility.",
+            ))
+
+
+def seed_turnout_intervals(cur) -> None:
+    """Seed one independently configurable reporting interval for every station."""
+    base=datetime(2027,8,10,8,0,tzinfo=timezone.utc)
+    for i,s in enumerate(STATIONS):
+        effective_from=base+timedelta(minutes=i)
+        cur.execute("""
+            INSERT INTO turnout_reporting_intervals(
+                election_id,polling_station_id,interval_minutes,effective_from,
+                effective_to,reporting_enabled
+            )
+            VALUES(%s,%s,%s,%s,NULL,TRUE)
+            ON CONFLICT(election_id,polling_station_id,effective_from) DO UPDATE SET
+                interval_minutes=EXCLUDED.interval_minutes,
+                effective_to=NULL,
+                reporting_enabled=EXCLUDED.reporting_enabled
+        """,(ELECTION_ID,s.station_id,s.turnout_interval_minutes,effective_from))
 
 
 def seed_observations(cur,source_document_id:int) -> None:
@@ -266,17 +721,26 @@ def seed_observations(cur,source_document_id:int) -> None:
             ON CONFLICT(election_id,polling_station_id,observation_version) DO UPDATE SET registered_voters=EXCLUDED.registered_voters,
             observed_at=EXCLUDED.observed_at,source_document_id=EXCLUDED.source_document_id,source_reference=EXCLUDED.source_reference
         """,(ELECTION_ID,s.station_id,s.registered,registered_at,source_document_id,f"SEED-REGISTERED-{s.station_id}-V1"))
+        interval_id=cur.execute("""
+            SELECT turnout_interval_id FROM turnout_reporting_intervals
+            WHERE election_id=%s AND polling_station_id=%s AND effective_from <= %s
+              AND (effective_to IS NULL OR effective_to > %s)
+            ORDER BY effective_from DESC LIMIT 1
+        """,(ELECTION_ID,s.station_id,registered_at,registered_at)).fetchone()["turnout_interval_id"]
         # Turnout is one voter count for the station, not six separate counts.
-        t1=registered_at+timedelta(hours=3);t2=registered_at+timedelta(hours=7)
+        # Store the configuration used at entry time so the audit trail preserves
+        # the exact reporting cadence that applied to each observation.
+        t1=registered_at+timedelta(minutes=s.turnout_interval_minutes)
+        t2=t1+timedelta(minutes=s.turnout_interval_minutes)
         initial=max(0,s.turnout-(5 if s.station_id=="PS005" else 0))
         for version,turnout,when in ((1,initial,t1),(2,s.turnout,t2)):
             ref=digest("TURNOUT",ELECTION_ID,s.station_id,version,turnout)
             cur.execute("""
-                INSERT INTO turnout_observations(election_id,polling_station_id,observation_version,voters_turnout,source_document_id,source_reference,observed_at)
-                VALUES(%s,%s,%s,%s,%s,%s,%s)
+                INSERT INTO turnout_observations(election_id,polling_station_id,observation_version,interval_configuration_id,voters_turnout,source_document_id,source_reference,observed_at)
+                VALUES(%s,%s,%s,%s,%s,%s,%s,%s)
                 ON CONFLICT(election_id,polling_station_id,observation_version) DO UPDATE SET voters_turnout=EXCLUDED.voters_turnout,
-                source_document_id=EXCLUDED.source_document_id,source_reference=EXCLUDED.source_reference,observed_at=EXCLUDED.observed_at
-            """,(ELECTION_ID,s.station_id,version,turnout,source_document_id,ref,when))
+                interval_configuration_id=EXCLUDED.interval_configuration_id,source_document_id=EXCLUDED.source_document_id,source_reference=EXCLUDED.source_reference,observed_at=EXCLUDED.observed_at
+            """,(ELECTION_ID,s.station_id,version,interval_id,turnout,source_document_id,ref,when))
         turnout_id=cur.execute("SELECT turnout_observation_id FROM turnout_observations WHERE election_id=%s AND polling_station_id=%s AND observation_version=2",(ELECTION_ID,s.station_id)).fetchone()["turnout_observation_id"]
         valid,rejected,spoilt=BASE_ACCOUNTING[s.station_id]
         for pos_index,(pid,*_) in enumerate(POSITIONS):
@@ -368,23 +832,24 @@ def seed_published_aggregates(cur,source_document_id:int)->None:
 
 def check(cur)->None:
     print("\nETVS SEED VERIFICATION\n"+"="*82)
-    tables=("positions","elections","counties","constituencies","wards","registration_centres","polling_stations","registered_voter_observations","turnout_observations","ballot_accounting_observations","candidates","result_submissions","published_aggregate_totals","audit_runs","audit_findings")
+    tables=("positions","elections","counties","constituencies","wards","registration_centres","polling_stations","turnout_reporting_intervals","registered_voter_observations","turnout_observations","ballot_accounting_observations","candidates","result_submissions","published_aggregate_totals","audit_runs","audit_findings")
     for table in tables:
         try: print(f"{table:38}{cur.execute(f'SELECT COUNT(*) AS n FROM {table}').fetchone()['n']:>7}")
         except psycopg.errors.UndefinedTable: print(f"{table:38} MISSING")
     rows=cur.execute("""
-        SELECT ps.polling_station_id,rv.registered_voters,t.voters_turnout,
+        SELECT ps.polling_station_id,ps.registered_voters,ri.interval_minutes turnout_interval_minutes,ri.reporting_enabled,rv.registered_voters,t.voters_turnout,
                COUNT(DISTINCT b.position_id) contests,MIN(b.valid_votes+b.rejected_votes) min_accounted,MAX(b.valid_votes+b.rejected_votes) max_accounted,
                COUNT(DISTINCT rs.position_id) result_positions
         FROM polling_stations ps
+        LEFT JOIN turnout_reporting_intervals ri ON ri.election_id=ps.election_id AND ri.polling_station_id=ps.polling_station_id AND ri.effective_to IS NULL
         LEFT JOIN registered_voter_observations rv ON rv.election_id=ps.election_id AND rv.polling_station_id=ps.polling_station_id AND rv.observation_version=(SELECT MAX(x.observation_version) FROM registered_voter_observations x WHERE x.election_id=ps.election_id AND x.polling_station_id=ps.polling_station_id)
         LEFT JOIN turnout_observations t ON t.election_id=ps.election_id AND t.polling_station_id=ps.polling_station_id AND t.observation_version=(SELECT MAX(x.observation_version) FROM turnout_observations x WHERE x.election_id=ps.election_id AND x.polling_station_id=ps.polling_station_id)
         LEFT JOIN ballot_accounting_observations b ON b.election_id=ps.election_id AND b.polling_station_id=ps.polling_station_id AND b.observation_version=(SELECT MAX(x.observation_version) FROM ballot_accounting_observations x WHERE x.election_id=ps.election_id AND x.polling_station_id=ps.polling_station_id AND x.position_id=b.position_id)
         LEFT JOIN result_submissions rs ON rs.election_id=ps.election_id AND rs.polling_station_id=ps.polling_station_id
-        WHERE ps.election_id=%s GROUP BY ps.polling_station_id,rv.registered_voters,t.voters_turnout ORDER BY ps.polling_station_id
+        WHERE ps.election_id=%s GROUP BY ps.polling_station_id,ps.registered_voters,ri.interval_minutes,ri.reporting_enabled,rv.registered_voters,t.voters_turnout ORDER BY ps.polling_station_id
     """,(ELECTION_ID,)).fetchall()
     print("\nSTATION COVERAGE")
-    for r in rows:print(f"{r['polling_station_id']}: registered={r['registered_voters']} turnout={r['voters_turnout']} contests={r['contests']} result_positions={r['result_positions']} accounting={r['min_accounted']}..{r['max_accounted']}")
+    for r in rows:print(f"{r['polling_station_id']}: registered={r['registered_voters']} turnout={r['voters_turnout']} interval={r['turnout_interval_minutes']}min enabled={r['reporting_enabled']} contests={r['contests']} result_positions={r['result_positions']} accounting={r['min_accounted']}..{r['max_accounted']}")
 
 
 def main()->int:
@@ -394,7 +859,7 @@ def main()->int:
             with conn.cursor() as cur:
                 ensure_schema(cur)
                 if a.reset:reset_sample(cur)
-                seed_positions(cur);source_doc,published_doc=seed_sources(cur);seed_master_data(cur);seed_observations(cur,source_doc);seed_results(cur,source_doc);seed_published_aggregates(cur,published_doc);ensure_reporting_views(cur);check(cur)
+                seed_positions(cur);source_doc,published_doc=seed_sources(cur);seed_master_data(cur);seed_special_voting_areas(cur,source_doc);seed_special_area_contest_rules(cur);seed_turnout_intervals(cur);seed_observations(cur,source_doc);seed_results(cur,source_doc);seed_published_aggregates(cur,published_doc);ensure_reporting_views(cur);check(cur)
             conn.commit()
         print("\nSEED SUCCESS: PostgreSQL data committed successfully.");return 0
     except Exception as exc:print(f"\nSEED FAILED: {exc}");return 1
