@@ -441,7 +441,7 @@ def seed_ballot_security(cur, ballot_source_document_id:int) -> None:
                 """,(
                     ELECTION_ID,s.station_id,spec_id,batch["ballot_batch_id"],
                     feat["security_feature_id"],serial,
-                    colour if feat["feature_type"]=="PAPER" else "Expected security feature present in controlled fixture",
+                    ("Green" if s.station_id=="PS006" and pid=="POS-PRESIDENT" else colour) if feat["feature_type"]=="PAPER" else "Expected security feature present in controlled fixture",
                     "ETVS fixture verification",ballot_source_document_id,
                     f"SEED-BALLOT-SECURITY-{s.station_id}-{pid}-{feat['feature_type']}"
                 ))
