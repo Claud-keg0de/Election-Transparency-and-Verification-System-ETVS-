@@ -135,6 +135,11 @@ def ensure_schema(cur) -> None:
     # Candidate affiliation constraints are added after the deterministic sample
     # candidates have been refreshed below, so legacy rows are not stranded.
     cur.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_party_symbol_current
+        ON party_symbols(party_id)
+        WHERE effective_to IS NULL
+    """)
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS independent_candidate_symbols (
             independent_symbol_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
             candidate_id TEXT NOT NULL UNIQUE,
