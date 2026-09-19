@@ -30,6 +30,11 @@ REQUIRED_COLUMNS = {
         "aggregation_level", "geography_id", "candidate_id", "position_id",
         "metric", "reported_value",
     },
+    "polling_stations": {
+        "polling_station_id", "election_id", "registration_centre_id",
+        "polling_station_code", "registered_voters",
+        "turnout_reporting_interval_minutes",
+    },
     "turnout_observations": {
         "turnout_observation_id", "election_id", "polling_station_id",
         "observation_version", "voters_turnout", "source_document_id",
@@ -162,6 +167,40 @@ def main() -> int:
                 if orphan:
                     failures.append(f"Result position mismatch rows: {orphan}")
 
+                interval_invalid = cur.execute("""
+                    SELECT COUNT(*) AS n
+                    FROM polling_stations
+                    WHERE election_id = %s
+                      AND (turnout_reporting_interval_minutes < 1
+                           OR turnout_reporting_interval_minutes > 1440)
+                """, (args.election_id,)).fetchone()["n"]
+                if interval_invalid:
+                    failures.append(f"Invalid polling-station turnout intervals: {interval_invalid}")
+
+                interval_violations = cur.execute("""
+                    WITH ordered AS (
+                        SELECT ps.polling_station_id,
+                               ps.turnout_reporting_interval_minutes,
+                               t.observed_at,
+                               LAG(t.observed_at) OVER (
+                                   PARTITION BY t.election_id,t.polling_station_id
+                                   ORDER BY t.observed_at,t.observation_version
+                               ) previous_observed_at
+                        FROM polling_stations ps
+                        JOIN turnout_observations t
+                          ON t.election_id=ps.election_id
+                         AND t.polling_station_id=ps.polling_station_id
+                        WHERE ps.election_id=%s
+                    )
+                    SELECT COUNT(*) AS n
+                    FROM ordered
+                    WHERE previous_observed_at IS NOT NULL
+                      AND observed_at < previous_observed_at
+                            + (turnout_reporting_interval_minutes * INTERVAL '1 minute')
+                """, (args.election_id,)).fetchone()["n"]
+                if interval_violations:
+                    failures.append(f"Turnout reporting interval violations: {interval_violations}")
+
                 invalid_hash = cur.execute(
                     """
                     SELECT COUNT(*) AS n
@@ -185,6 +224,8 @@ def main() -> int:
                 print("POSITION RELATIONSHIPS: PASS")
                 print("RESULT/CANDIDATE POSITION ALIGNMENT: PASS")
                 print("RESULT SUBMISSION HASH PRESENCE: PASS")
+                print("TURNOUT INTERVAL CONFIGURATION: PASS")
+                print("TURNOUT INTERVAL ENFORCEMENT DATA CHECK: PASS")
                 print("CONSISTENCY: PASS")
                 return 0
 
