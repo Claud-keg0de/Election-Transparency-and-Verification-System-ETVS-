@@ -19,6 +19,10 @@ ELECTION_ID = "KE-PRES-2027"
 
 REQUIRED_COLUMNS = {
     "regions": {"region_id", "region_name", "region_type"},
+    "special_voting_areas": {
+        "special_voting_area_id", "election_id", "area_code", "area_name",
+        "voting_category", "source_document_id", "notes"
+    },
     "county_region_assignments": {"county_id", "region_id"},
     "political_parties": {"party_id", "party_name", "party_abbreviation"},
     "party_symbols": {"party_symbol_id", "party_id", "symbol_name", "symbol_uri", "approved"},
@@ -39,6 +43,11 @@ REQUIRED_COLUMNS = {
         "turnout_interval_id", "election_id", "polling_station_id",
         "interval_minutes", "effective_from", "effective_to",
         "reporting_enabled", "created_at",
+    },
+    "polling_stations": {
+        "polling_station_id", "election_id", "registration_centre_id",
+        "special_voting_area_id", "location_type", "polling_station_code",
+        "registered_voters"
     },
     "turnout_observations": {
         "turnout_observation_id", "election_id", "polling_station_id",
@@ -151,6 +160,9 @@ def main() -> int:
 
                 checks = [
                     ("regions", "SELECT COUNT(*) AS n FROM regions"),
+                    ("counties", "SELECT COUNT(*) AS n FROM counties"),
+                    ("constituencies", "SELECT COUNT(*) AS n FROM constituencies"),
+                    ("special_voting_areas", "SELECT COUNT(*) AS n FROM special_voting_areas WHERE election_id = %s"),
                     ("political_parties", "SELECT COUNT(*) AS n FROM political_parties"),
                     ("party_symbols", "SELECT COUNT(*) AS n FROM party_symbols"),
                     ("independent_candidate_symbols", "SELECT COUNT(*) AS n FROM independent_candidate_symbols WHERE election_id = %s"),
@@ -170,6 +182,34 @@ def main() -> int:
                 region_count = cur.execute("SELECT COUNT(*) AS n FROM regions").fetchone()["n"]
                 if region_count != 8:
                     failures.append(f"Expected 8 Kenya geographic regions, found: {region_count}")
+
+                county_count = cur.execute("SELECT COUNT(*) AS n FROM counties").fetchone()["n"]
+                if county_count != 47:
+                    failures.append(f"Expected 47 Kenya counties, found: {county_count}")
+
+                constituency_count = cur.execute("SELECT COUNT(*) AS n FROM constituencies").fetchone()["n"]
+                if constituency_count != 290:
+                    failures.append(f"Expected 290 Kenya constituencies, found: {constituency_count}")
+
+                special_area_count = cur.execute(
+                    "SELECT COUNT(*) AS n FROM special_voting_areas WHERE election_id=%s",
+                    (args.election_id,)
+                ).fetchone()["n"]
+                if special_area_count < 2:
+                    failures.append(f"Expected Diaspora and Prisons special voting areas, found: {special_area_count}")
+
+                special_location_errors = cur.execute("""
+                    SELECT COUNT(*) AS n
+                    FROM polling_stations
+                    WHERE election_id=%s
+                      AND (
+                        (location_type='NORMAL' AND (registration_centre_id IS NULL OR special_voting_area_id IS NOT NULL))
+                        OR
+                        (location_type='SPECIAL' AND (registration_centre_id IS NOT NULL OR special_voting_area_id IS NULL))
+                      )
+                """,(args.election_id,)).fetchone()["n"]
+                if special_location_errors:
+                    failures.append(f"Polling station location classification errors: {special_location_errors}")
 
                 regionless_counties = cur.execute("""
                     SELECT COUNT(*) AS n FROM counties c
@@ -292,7 +332,8 @@ def main() -> int:
                 print("SCHEMA CONTRACT: PASS")
                 print("POSITION RELATIONSHIPS: PASS")
                 print("CANDIDATE PARTY/INDEPENDENT SYMBOL MODEL: PASS")
-                print("KENYA 8-REGION REFERENCE LAYER: PASS")
+                print("KENYA 8-REGION / 47-COUNTY / 290-CONSTITUENCY REFERENCE LAYER: PASS")
+                print("DIASPORA / PRISONS SPECIAL VOTING AREAS: PASS")
                 print("TURNOUT INTERVAL CONFIGURATION: PASS")
                 print("TURNOUT OBSERVATION/INTERVAL ALIGNMENT: PASS")
                 print("RESULT/CANDIDATE POSITION ALIGNMENT: PASS")
