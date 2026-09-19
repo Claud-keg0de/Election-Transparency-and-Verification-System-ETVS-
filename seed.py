@@ -330,6 +330,7 @@ def reset_sample(cur) -> None:
         "DELETE FROM polling_stations WHERE election_id=%s",
         "DELETE FROM independent_candidate_symbols WHERE election_id=%s",
         "DELETE FROM candidates WHERE election_id=%s",
+        "DELETE FROM special_voting_areas WHERE election_id=%s",
         "DELETE FROM elections WHERE election_id=%s",
     ):
         try: cur.execute(sql,(ELECTION_ID,))
@@ -676,7 +677,7 @@ def main()->int:
             with conn.cursor() as cur:
                 ensure_schema(cur)
                 if a.reset:reset_sample(cur)
-                seed_positions(cur);source_doc,published_doc=seed_sources(cur);seed_master_data(cur);seed_turnout_intervals(cur);seed_observations(cur,source_doc);seed_results(cur,source_doc);seed_published_aggregates(cur,published_doc);ensure_reporting_views(cur);check(cur)
+                seed_positions(cur);source_doc,published_doc=seed_sources(cur);seed_master_data(cur);seed_special_voting_areas(cur,source_doc);seed_turnout_intervals(cur);seed_observations(cur,source_doc);seed_results(cur,source_doc);seed_published_aggregates(cur,published_doc);ensure_reporting_views(cur);check(cur)
             conn.commit()
         print("\nSEED SUCCESS: PostgreSQL data committed successfully.");return 0
     except Exception as exc:print(f"\nSEED FAILED: {exc}");return 1
