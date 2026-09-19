@@ -197,7 +197,7 @@ def ensure_schema(cur) -> None:
                 REFERENCES special_voting_slots(special_voting_slot_id)
                 ON UPDATE CASCADE ON DELETE RESTRICT;
             END IF;
-        END $;
+        END $etvs$;
     """)
     cur.execute("ALTER TABLE polling_stations ADD COLUMN IF NOT EXISTS location_type TEXT NOT NULL DEFAULT 'NORMAL'")
     cur.execute("ALTER TABLE polling_stations ALTER COLUMN registration_centre_id DROP NOT NULL")
@@ -214,7 +214,7 @@ def ensure_schema(cur) -> None:
                 REFERENCES special_voting_areas(special_voting_area_id)
                 ON UPDATE CASCADE ON DELETE RESTRICT;
             END IF;
-        END $;
+        END $etvs$;
     """)
 
     cur.execute("ALTER TABLE candidates ADD COLUMN IF NOT EXISTS candidate_type TEXT NOT NULL DEFAULT 'PARTY'")
@@ -249,7 +249,7 @@ def ensure_schema(cur) -> None:
                 REFERENCES candidates(candidate_id, election_id)
                 ON UPDATE CASCADE ON DELETE RESTRICT;
             END IF;
-        END $;
+        END $etvs$;
     """)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS registered_voter_observations (
@@ -371,7 +371,7 @@ def ensure_schema(cur) -> None:
     """)
     cur.execute("""
         CREATE OR REPLACE FUNCTION validate_candidate_electoral_area()
-        RETURNS trigger LANGUAGE plpgsql AS $
+        RETURNS trigger LANGUAGE plpgsql AS $etvs$
         DECLARE expected_geography TEXT; candidate_position TEXT; candidate_party TEXT; candidate_kind TEXT;
         BEGIN
             SELECT p.geography_level,c.position_id,c.party_id,c.candidate_type
@@ -387,7 +387,7 @@ def ensure_schema(cur) -> None:
             IF NEW.electoral_area_type='CONSTITUENCY' AND NOT EXISTS (SELECT 1 FROM constituencies WHERE constituency_id=NEW.electoral_area_id) THEN RAISE EXCEPTION 'Unknown constituency area %',NEW.electoral_area_id; END IF;
             IF NEW.electoral_area_type='WARD' AND NOT EXISTS (SELECT 1 FROM wards WHERE ward_id=NEW.electoral_area_id) THEN RAISE EXCEPTION 'Unknown ward area %',NEW.electoral_area_id; END IF;
             RETURN NEW;
-        END $;
+        END $etvs$;
     """)
     cur.execute("DROP TRIGGER IF EXISTS trg_validate_candidate_electoral_area ON candidate_electoral_areas")
     cur.execute("""
@@ -397,7 +397,7 @@ def ensure_schema(cur) -> None:
     """)
     cur.execute("""
         CREATE OR REPLACE FUNCTION validate_result_candidate_electoral_area()
-        RETURNS trigger LANGUAGE plpgsql AS $
+        RETURNS trigger LANGUAGE plpgsql AS $etvs$
         DECLARE station_area_type TEXT; station_area_id TEXT; candidate_area_type TEXT; candidate_area_id TEXT;
         BEGIN
             SELECT p.geography_level,
@@ -425,7 +425,7 @@ def ensure_schema(cur) -> None:
                 RAISE EXCEPTION 'Candidate % is not valid for polling station % area (%:%)',NEW.candidate_id,NEW.polling_station_id,station_area_type,station_area_id;
             END IF;
             RETURN NEW;
-        END $;
+        END $etvs$;
     """)
     cur.execute("DROP TRIGGER IF EXISTS trg_validate_result_candidate_electoral_area ON result_submissions")
     cur.execute("""
@@ -683,7 +683,7 @@ def seed_master_data(cur) -> None:
                 CHECK ((candidate_type='PARTY' AND party_id IS NOT NULL)
                     OR (candidate_type='INDEPENDENT' AND party_id IS NULL));
             END IF;
-        END $;
+        END $etvs$;
     """)
 
 
