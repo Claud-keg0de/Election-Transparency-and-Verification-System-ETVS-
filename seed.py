@@ -507,6 +507,7 @@ def reset_sample(cur) -> None:
         "DELETE FROM special_voting_slots WHERE election_id=%s",
         "DELETE FROM special_voting_area_reference_stations WHERE special_voting_area_id IN (SELECT special_voting_area_id FROM special_voting_areas WHERE election_id=%s)",
         "DELETE FROM independent_candidate_symbols WHERE election_id=%s",
+        "DELETE FROM candidate_electoral_areas WHERE election_id=%s",
         "DELETE FROM candidates WHERE election_id=%s",
         "DELETE FROM special_area_contest_rules WHERE special_voting_area_id IN (SELECT special_voting_area_id FROM special_voting_areas WHERE election_id=%s)",
         "DELETE FROM special_voting_areas WHERE election_id=%s",
