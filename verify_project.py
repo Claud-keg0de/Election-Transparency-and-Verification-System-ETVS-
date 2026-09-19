@@ -27,6 +27,17 @@ REQUIRED_COLUMNS = {
         "special_voting_area_id", "election_id", "area_code", "area_name",
         "voting_category", "country_name", "source_document_id", "notes"
     },
+    "special_voting_slots": {
+        "special_voting_slot_id", "election_id", "special_voting_area_id",
+        "slot_code", "slot_number", "slot_status", "location_label",
+        "country_name", "official_polling_station_code", "registered_voters",
+        "source_document_id", "notes"
+    },
+    "special_voting_area_reference_stations": {
+        "reference_station_id", "special_voting_area_id", "reference_year",
+        "registration_centre_code", "polling_station_code",
+        "polling_station_name", "registered_voters", "source_document_id", "notes"
+    },
     "county_region_assignments": {"county_id", "region_id"},
     "political_parties": {"party_id", "party_name", "party_abbreviation"},
     "party_symbols": {"party_symbol_id", "party_id", "symbol_name", "symbol_uri", "approved"},
@@ -50,8 +61,8 @@ REQUIRED_COLUMNS = {
     },
     "polling_stations": {
         "polling_station_id", "election_id", "registration_centre_id",
-        "special_voting_area_id", "location_type", "polling_station_code",
-        "registered_voters"
+        "special_voting_area_id", "special_voting_slot_id", "location_type",
+        "polling_station_code", "registered_voters"
     },
     "turnout_observations": {
         "turnout_observation_id", "election_id", "polling_station_id",
@@ -88,6 +99,7 @@ REQUIRED_FKS = {
     "fk_audit_run_position",
     "fk_finding_position",
     "fk_turnout_interval_configuration",
+    "fk_polling_station_special_slot",
 }
 
 
@@ -169,6 +181,8 @@ def main() -> int:
                     ("counties", "SELECT COUNT(*) AS n FROM counties"),
                     ("constituencies", "SELECT COUNT(*) AS n FROM constituencies"),
                     ("special_voting_areas", "SELECT COUNT(*) AS n FROM special_voting_areas WHERE election_id = %s"),
+                    ("special_voting_slots", "SELECT COUNT(*) AS n FROM special_voting_slots WHERE election_id = %s"),
+                    ("special_voting_area_reference_stations", "SELECT COUNT(*) AS n FROM special_voting_area_reference_stations WHERE reference_year = 2022"),
                     ("political_parties", "SELECT COUNT(*) AS n FROM political_parties"),
                     ("party_symbols", "SELECT COUNT(*) AS n FROM party_symbols"),
                     ("independent_candidate_symbols", "SELECT COUNT(*) AS n FROM independent_candidate_symbols WHERE election_id = %s"),
@@ -201,8 +215,15 @@ def main() -> int:
                     "SELECT COUNT(*) AS n FROM special_voting_areas WHERE election_id=%s",
                     (args.election_id,)
                 ).fetchone()["n"]
-                if special_area_count < 13:
-                    failures.append(f"Expected 12 diaspora country areas plus 1 prison area, found: {special_area_count}")
+                category_count = cur.execute("""
+                    SELECT COUNT(DISTINCT voting_category) AS n
+                    FROM special_voting_areas
+                    WHERE election_id=%s
+                """, (args.election_id,)).fetchone()["n"]
+                if category_count != 2:
+                    failures.append(
+                        f"Expected both DIASPORA and PRISON special voting categories, found: {category_count}"
+                    )
 
                 special_rule_stats = cur.execute("""
                     SELECT COUNT(*) AS total_rules,
@@ -221,42 +242,72 @@ def main() -> int:
                         f"Expected 13 historical presidential-only special-area allowances, found: {special_rule_stats['allowed_rules']}"
                     )
 
-                diaspora_station_stats = cur.execute("""
+                # Historical station counts are checked in the reference layer,
+                # not in the active 2027 polling-station table.
+                diaspora_reference = cur.execute("""
                     SELECT COUNT(*) AS station_count,
                            COALESCE(SUM(registered_voters),0) AS registered_voters
-                    FROM polling_stations ps
+                    FROM special_voting_area_reference_stations rs
                     JOIN special_voting_areas sva
-                      ON sva.special_voting_area_id = ps.special_voting_area_id
-                    WHERE ps.election_id=%s
-                      AND ps.location_type='SPECIAL'
+                      ON sva.special_voting_area_id=rs.special_voting_area_id
+                    WHERE rs.reference_year=2022
                       AND sva.voting_category='DIASPORA'
-                """, (args.election_id,)).fetchone()
-                if diaspora_station_stats["station_count"] != 27:
+                """).fetchone()
+                if diaspora_reference["station_count"] != 27:
                     failures.append(
-                        f"Expected 27 historical diaspora polling stations, found: {diaspora_station_stats['station_count']}"
+                        f"Expected 27 historical diaspora reference stations, found: {diaspora_reference['station_count']}"
                     )
-                if diaspora_station_stats["registered_voters"] != 10443:
+                if diaspora_reference["registered_voters"] != 10443:
                     failures.append(
-                        f"Expected 10,443 historical diaspora registered voters, found: {diaspora_station_stats['registered_voters']}"
+                        f"Expected 10,443 historical diaspora reference voters, found: {diaspora_reference['registered_voters']}"
                     )
 
-                prison_station_stats = cur.execute("""
+                prison_reference = cur.execute("""
                     SELECT COUNT(*) AS station_count,
                            COALESCE(SUM(registered_voters),0) AS registered_voters
-                    FROM polling_stations ps
+                    FROM special_voting_area_reference_stations rs
                     JOIN special_voting_areas sva
-                      ON sva.special_voting_area_id = ps.special_voting_area_id
-                    WHERE ps.election_id=%s
-                      AND ps.location_type='SPECIAL'
+                      ON sva.special_voting_area_id=rs.special_voting_area_id
+                    WHERE rs.reference_year=2022
                       AND sva.voting_category='PRISON'
-                """, (args.election_id,)).fetchone()
-                if prison_station_stats["station_count"] != 106:
+                """).fetchone()
+                if prison_reference["station_count"] != 106:
                     failures.append(
-                        f"Expected 106 historical prison Gazette polling-station rows, found: {prison_station_stats['station_count']}"
+                        f"Expected 106 historical prison Gazette reference rows, found: {prison_reference['station_count']}"
                     )
-                if prison_station_stats["registered_voters"] != 7483:
+                if prison_reference["registered_voters"] != 7483:
                     failures.append(
-                        f"Expected 7,483 historical prison registered voters, found: {prison_station_stats['registered_voters']}"
+                        f"Expected 7,483 historical prison reference voters, found: {prison_reference['registered_voters']}"
+                    )
+
+                active_special_slots = cur.execute("""
+                    SELECT COUNT(*) AS n
+                    FROM special_voting_slots
+                    WHERE election_id=%s
+                      AND slot_status='ACTIVE'
+                """, (args.election_id,)).fetchone()["n"]
+                active_special_stations = cur.execute("""
+                    SELECT COUNT(*) AS n
+                    FROM polling_stations
+                    WHERE election_id=%s
+                      AND location_type='SPECIAL'
+                """, (args.election_id,)).fetchone()["n"]
+                if active_special_stations > active_special_slots:
+                    failures.append(
+                        f"Active special polling stations ({active_special_stations}) exceed active configured slots ({active_special_slots})"
+                    )
+
+                unassigned_active_slots = cur.execute("""
+                    SELECT COUNT(*) AS n
+                    FROM special_voting_slots
+                    WHERE election_id=%s
+                      AND slot_status='ACTIVE'
+                      AND official_polling_station_code IS NOT NULL
+                      AND registered_voters IS NULL
+                """, (args.election_id,)).fetchone()["n"]
+                if unassigned_active_slots:
+                    failures.append(
+                        f"Active special slots with an official station code but no registered-voter value: {unassigned_active_slots}"
                     )
 
                 special_location_errors = cur.execute("""
@@ -394,7 +445,8 @@ def main() -> int:
                 print("POSITION RELATIONSHIPS: PASS")
                 print("CANDIDATE PARTY/INDEPENDENT SYMBOL MODEL: PASS")
                 print("KENYA 8-REGION / 47-COUNTY / 290-CONSTITUENCY REFERENCE LAYER: PASS")
-                print("DIASPORA / PRISONS SPECIAL VOTING AREAS: PASS")
+                print("DIASPORA / PRISONS CONFIGURABLE SLOT MODEL: PASS")
+                print("2022 SPECIAL-VOTING REFERENCE LAYER: PASS")
                 print("TURNOUT INTERVAL CONFIGURATION: PASS")
                 print("TURNOUT OBSERVATION/INTERVAL ALIGNMENT: PASS")
                 print("RESULT/CANDIDATE POSITION ALIGNMENT: PASS")
