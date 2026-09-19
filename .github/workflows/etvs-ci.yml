@@ -58,3 +58,25 @@ jobs:
 
       - name: Verify audit hash chain
         run: python audit_engine.py KE-PRES-2027 --verify-chain
+
+      - name: Exercise turnout interval enforcement
+        shell: bash
+        run: |
+          set -euo pipefail
+          psql postgresql://postgres:postgres@localhost:5432/etvs -v ON_ERROR_STOP=1 <<'SQL'
+          INSERT INTO turnout_observations (
+            election_id, polling_station_id, observation_version,
+            voters_turnout, source_reference, observed_at
+          )
+          SELECT election_id, polling_station_id,
+                 MAX(observation_version) + 1,
+                 MAX(voters_turnout),
+                 'CI-INTERVAL-TEST',
+                 MAX(observed_at) + INTERVAL '1 minute'
+          FROM turnout_observations
+          WHERE election_id='KE-PRES-2027'
+            AND polling_station_id='PS001'
+          GROUP BY election_id, polling_station_id;
+          SQL
+          python audit_engine.py KE-PRES-2027 | tee /tmp/etvs-audit.txt
+          grep -q "R014 FAILED" /tmp/etvs-audit.txt
