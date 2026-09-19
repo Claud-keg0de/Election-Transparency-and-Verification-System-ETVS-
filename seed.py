@@ -416,7 +416,20 @@ def ensure_schema(cur) -> None:
               JOIN positions p ON p.position_id=NEW.position_id
              WHERE ps.polling_station_id=NEW.polling_station_id AND ps.election_id=NEW.election_id;
             IF NOT FOUND THEN RAISE EXCEPTION 'Cannot resolve polling station % and position %',NEW.polling_station_id,NEW.position_id; END IF;
-            IF EXISTS (SELECT 1 FROM polling_stations WHERE polling_station_id=NEW.polling_station_id AND location_type='SPECIAL') THEN RETURN NEW; END IF;
+            IF EXISTS (
+                SELECT 1 FROM polling_stations ps
+                JOIN special_area_contest_rules sar
+                  ON sar.special_voting_area_id=ps.special_voting_area_id
+                 AND sar.position_id=NEW.position_id
+                 AND sar.reference_year=(SELECT EXTRACT(YEAR FROM election_date)::INTEGER FROM elections WHERE election_id=NEW.election_id)
+                 AND sar.eligibility_status='ALLOWED'
+                WHERE ps.polling_station_id=NEW.polling_station_id AND ps.election_id=NEW.election_id AND ps.location_type='SPECIAL'
+            ) THEN RETURN NEW;
+            ELSIF EXISTS (
+                SELECT 1 FROM polling_stations WHERE polling_station_id=NEW.polling_station_id AND election_id=NEW.election_id AND location_type='SPECIAL'
+            ) THEN
+                RAISE EXCEPTION 'Position % is not currently eligible at special polling station % for this election',NEW.position_id,NEW.polling_station_id;
+            END IF;
             SELECT electoral_area_type,electoral_area_id INTO candidate_area_type,candidate_area_id
               FROM candidate_electoral_areas
              WHERE candidate_id=NEW.candidate_id AND election_id=NEW.election_id AND position_id=NEW.position_id;
