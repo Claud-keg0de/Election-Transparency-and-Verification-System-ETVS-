@@ -522,7 +522,7 @@ def seed_results(cur,source_document_id:int)->None:
                     h=digest("RESULT",ELECTION_ID,s.station_id,cid,version,final)
                     cur.execute("""
                         INSERT INTO result_submissions(election_id,polling_station_id,candidate_id,result_version,votes,position_id,submission_hash,source_document_id,source_reference,observed_at)
-                        VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                        VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                         ON CONFLICT(election_id,polling_station_id,candidate_id,result_version) DO UPDATE SET votes=EXCLUDED.votes,position_id=EXCLUDED.position_id,
                         submission_hash=EXCLUDED.submission_hash,source_document_id=EXCLUDED.source_document_id,source_reference=EXCLUDED.source_reference,observed_at=EXCLUDED.observed_at
                     """,(ELECTION_ID,s.station_id,cid,version,final,pid,h,source_document_id,f"SEED-RESULT-{s.station_id}-{pid}-V{version}",when))
