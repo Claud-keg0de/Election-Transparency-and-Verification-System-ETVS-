@@ -407,6 +407,71 @@ CREATE INDEX idx_special_voting_areas_election
 
 /*
 ===============================================================================
+7A. SPECIAL-AREA CONTEST REFERENCE RULES
+===============================================================================
+
+This table stores historical or future eligibility rules independently from the
+active election row. This is important because historical 2022 voting rules
+must not be silently applied to the 2027 election.
+
+For example, 2022 IEBC material records presidential voting for the diaspora
+and prison special-voting categories. A future 2027 rule must be loaded as its
+own reference-year record from the applicable official legal/Gazette material.
+===============================================================================
+*/
+
+CREATE TABLE special_area_contest_rules (
+    special_area_contest_rule_id BIGINT
+        GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+
+    special_voting_area_id TEXT NOT NULL,
+
+    position_id TEXT NOT NULL,
+
+    reference_year INTEGER NOT NULL,
+
+    eligibility_status TEXT NOT NULL,
+
+    source_document_id BIGINT,
+
+    notes TEXT,
+
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT fk_special_rule_area
+        FOREIGN KEY (special_voting_area_id)
+        REFERENCES special_voting_areas(special_voting_area_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT,
+
+    CONSTRAINT fk_special_rule_position
+        FOREIGN KEY (position_id)
+        REFERENCES positions(position_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT,
+
+    CONSTRAINT fk_special_rule_source
+        FOREIGN KEY (source_document_id)
+        REFERENCES source_documents(document_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT,
+
+    CONSTRAINT special_rule_status_check
+        CHECK (eligibility_status IN ('ALLOWED','NOT_ELIGIBLE')),
+
+    CONSTRAINT special_rule_year_check
+        CHECK (reference_year >= 2012),
+
+    CONSTRAINT unique_special_area_contest_rule
+        UNIQUE (special_voting_area_id, position_id, reference_year)
+);
+
+CREATE INDEX idx_special_area_contest_rules_year
+    ON special_area_contest_rules(reference_year, special_voting_area_id);
+
+
+/*
+===============================================================================
 7. POLLING STATIONS
 ===============================================================================
 
