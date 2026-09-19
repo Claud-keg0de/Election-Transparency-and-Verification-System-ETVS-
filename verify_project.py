@@ -18,8 +18,36 @@ from psycopg.rows import dict_row
 ELECTION_ID = "KE-PRES-2027"
 
 REQUIRED_COLUMNS = {
+    "regions": {"region_id", "region_name", "region_type"},
+    "special_area_contest_rules": {
+        "special_area_contest_rule_id", "special_voting_area_id", "position_id",
+        "reference_year", "eligibility_status", "source_document_id", "notes",
+    },
+    "special_voting_areas": {
+        "special_voting_area_id", "election_id", "area_code", "area_name",
+        "voting_category", "country_name", "source_document_id", "notes"
+    },
+    "special_voting_slots": {
+        "special_voting_slot_id", "election_id", "special_voting_area_id",
+        "slot_code", "slot_number", "slot_status", "location_label",
+        "country_name", "official_polling_station_code", "registered_voters",
+        "source_document_id", "notes"
+    },
+    "special_voting_area_reference_stations": {
+        "reference_station_id", "special_voting_area_id", "reference_year",
+        "registration_centre_code", "polling_station_code",
+        "polling_station_name", "registered_voters", "source_document_id", "notes"
+    },
+    "county_region_assignments": {"county_id", "region_id"},
+    "political_parties": {"party_id", "party_name", "party_abbreviation"},
+    "party_symbols": {"party_symbol_id", "party_id", "symbol_name", "symbol_uri", "approved"},
+    "independent_candidate_symbols": {"independent_symbol_id", "candidate_id", "election_id", "symbol_name", "symbol_uri", "approved"},
     "positions": {"position_id", "position_name", "election_level", "geography_level"},
-    "candidates": {"candidate_id", "election_id", "candidate_name", "office", "position_id"},
+    "candidates": {"candidate_id", "election_id", "candidate_name", "office", "position_id", "candidate_type", "party_id"},
+    "candidate_electoral_areas": {
+        "candidate_electoral_area_id", "candidate_id", "election_id", "position_id",
+        "electoral_area_type", "electoral_area_id", "candidate_type", "party_id"
+    },
     "result_submissions": {
         "result_submission_id", "election_id", "polling_station_id",
         "candidate_id", "result_version", "votes", "position_id",
@@ -30,9 +58,20 @@ REQUIRED_COLUMNS = {
         "aggregation_level", "geography_id", "candidate_id", "position_id",
         "metric", "reported_value",
     },
+    "turnout_reporting_intervals": {
+        "turnout_interval_id", "election_id", "polling_station_id",
+        "interval_minutes", "effective_from", "effective_to",
+        "reporting_enabled", "created_at",
+    },
+    "polling_stations": {
+        "polling_station_id", "election_id", "registration_centre_id",
+        "special_voting_area_id", "special_voting_slot_id", "location_type",
+        "polling_station_code", "registered_voters"
+    },
     "turnout_observations": {
         "turnout_observation_id", "election_id", "polling_station_id",
-        "observation_version", "voters_turnout", "source_document_id",
+        "observation_version", "interval_configuration_id", "voters_turnout",
+        "observed_at", "source_document_id",
     },
     "ballot_accounting_observations": {
         "ballot_accounting_observation_id", "election_id",
@@ -53,11 +92,21 @@ REQUIRED_COLUMNS = {
 }
 
 REQUIRED_FKS = {
+    "fk_special_rule_area",
+    "fk_special_rule_position",
     "fk_candidate_position",
+    "fk_candidate_party",
+    "fk_independent_symbol_candidate",
+    "fk_county_region_region",
     "fk_result_position",
     "fk_published_aggregate_position",
     "fk_audit_run_position",
     "fk_finding_position",
+    "fk_turnout_interval_configuration",
+    "fk_polling_station_special_slot",
+    "fk_candidate_area_candidate",
+    "fk_candidate_area_position",
+    "fk_candidate_area_party",
 }
 
 
@@ -135,9 +184,20 @@ def main() -> int:
                 print(f"Election: {args.election_id}")
 
                 checks = [
+                    ("regions", "SELECT COUNT(*) AS n FROM regions"),
+                    ("counties", "SELECT COUNT(*) AS n FROM counties"),
+                    ("constituencies", "SELECT COUNT(*) AS n FROM constituencies"),
+                    ("special_voting_areas", "SELECT COUNT(*) AS n FROM special_voting_areas WHERE election_id = %s"),
+                    ("special_voting_slots", "SELECT COUNT(*) AS n FROM special_voting_slots WHERE election_id = %s"),
+                    ("special_voting_area_reference_stations", "SELECT COUNT(*) AS n FROM special_voting_area_reference_stations WHERE reference_year = 2022"),
+                    ("political_parties", "SELECT COUNT(*) AS n FROM political_parties"),
+                    ("party_symbols", "SELECT COUNT(*) AS n FROM party_symbols"),
+                    ("independent_candidate_symbols", "SELECT COUNT(*) AS n FROM independent_candidate_symbols WHERE election_id = %s"),
                     ("positions", "SELECT COUNT(*) AS n FROM positions"),
                     ("candidates", "SELECT COUNT(*) AS n FROM candidates WHERE election_id = %s"),
+                    ("candidate_electoral_areas", "SELECT COUNT(*) AS n FROM candidate_electoral_areas WHERE election_id = %s"),
                     ("polling_stations", "SELECT COUNT(*) AS n FROM polling_stations WHERE election_id = %s"),
+                    ("turnout_reporting_intervals", "SELECT COUNT(*) AS n FROM turnout_reporting_intervals WHERE election_id = %s"),
                     ("turnout_observations", "SELECT COUNT(*) AS n FROM turnout_observations WHERE election_id = %s"),
                     ("ballot_accounting_observations", "SELECT COUNT(*) AS n FROM ballot_accounting_observations WHERE election_id = %s"),
                     ("result_submissions", "SELECT COUNT(*) AS n FROM result_submissions WHERE election_id = %s"),
@@ -146,6 +206,265 @@ def main() -> int:
                 for label, sql in checks:
                     row = cur.execute(sql, (args.election_id,) if "%s" in sql else ()).fetchone()
                     print(f"{label:35} {row['n']}")
+
+                region_count = cur.execute("SELECT COUNT(*) AS n FROM regions").fetchone()["n"]
+                if region_count != 8:
+                    failures.append(f"Expected 8 Kenya geographic regions, found: {region_count}")
+
+                county_count = cur.execute("SELECT COUNT(*) AS n FROM counties").fetchone()["n"]
+                if county_count != 47:
+                    failures.append(f"Expected 47 Kenya counties, found: {county_count}")
+
+                constituency_count = cur.execute("SELECT COUNT(*) AS n FROM constituencies").fetchone()["n"]
+                if constituency_count != 290:
+                    failures.append(f"Expected 290 Kenya constituencies, found: {constituency_count}")
+
+                special_area_count = cur.execute(
+                    "SELECT COUNT(*) AS n FROM special_voting_areas WHERE election_id=%s",
+                    (args.election_id,)
+                ).fetchone()["n"]
+                category_count = cur.execute("""
+                    SELECT COUNT(DISTINCT voting_category) AS n
+                    FROM special_voting_areas
+                    WHERE election_id=%s
+                """, (args.election_id,)).fetchone()["n"]
+                if category_count != 2:
+                    failures.append(
+                        f"Expected both DIASPORA and PRISON special voting categories, found: {category_count}"
+                    )
+
+                special_rule_stats = cur.execute("""
+                    SELECT COUNT(*) AS total_rules,
+                           COUNT(*) FILTER (WHERE reference_year=2022 AND eligibility_status='ALLOWED') AS allowed_rules
+                    FROM special_area_contest_rules sar
+                    JOIN special_voting_areas sva
+                      ON sva.special_voting_area_id=sar.special_voting_area_id
+                    WHERE sva.election_id=%s
+                """, (args.election_id,)).fetchone()
+                if special_rule_stats["total_rules"] != 78:
+                    failures.append(
+                        f"Expected 78 historical 2022 special-area contest rules, found: {special_rule_stats['total_rules']}"
+                    )
+                if special_rule_stats["allowed_rules"] != 13:
+                    failures.append(
+                        f"Expected 13 historical presidential-only special-area allowances, found: {special_rule_stats['allowed_rules']}"
+                    )
+
+                # Historical station counts are checked in the reference layer,
+                # not in the active 2027 polling-station table.
+                diaspora_reference = cur.execute("""
+                    SELECT COUNT(*) AS station_count,
+                           COALESCE(SUM(registered_voters),0) AS registered_voters
+                    FROM special_voting_area_reference_stations rs
+                    JOIN special_voting_areas sva
+                      ON sva.special_voting_area_id=rs.special_voting_area_id
+                    WHERE rs.reference_year=2022
+                      AND sva.voting_category='DIASPORA'
+                """).fetchone()
+                if diaspora_reference["station_count"] != 27:
+                    failures.append(
+                        f"Expected 27 historical diaspora reference stations, found: {diaspora_reference['station_count']}"
+                    )
+                if diaspora_reference["registered_voters"] != 10443:
+                    failures.append(
+                        f"Expected 10,443 historical diaspora reference voters, found: {diaspora_reference['registered_voters']}"
+                    )
+
+                prison_reference = cur.execute("""
+                    SELECT COUNT(*) AS station_count,
+                           COALESCE(SUM(registered_voters),0) AS registered_voters
+                    FROM special_voting_area_reference_stations rs
+                    JOIN special_voting_areas sva
+                      ON sva.special_voting_area_id=rs.special_voting_area_id
+                    WHERE rs.reference_year=2022
+                      AND sva.voting_category='PRISON'
+                """).fetchone()
+                if prison_reference["station_count"] != 106:
+                    failures.append(
+                        f"Expected 106 historical prison Gazette reference rows, found: {prison_reference['station_count']}"
+                    )
+                if prison_reference["registered_voters"] != 7483:
+                    failures.append(
+                        f"Expected 7,483 historical prison reference voters, found: {prison_reference['registered_voters']}"
+                    )
+
+                active_special_slots = cur.execute("""
+                    SELECT COUNT(*) AS n
+                    FROM special_voting_slots
+                    WHERE election_id=%s
+                      AND slot_status='ACTIVE'
+                """, (args.election_id,)).fetchone()["n"]
+                active_special_stations = cur.execute("""
+                    SELECT COUNT(*) AS n
+                    FROM polling_stations
+                    WHERE election_id=%s
+                      AND location_type='SPECIAL'
+                """, (args.election_id,)).fetchone()["n"]
+                if active_special_stations > active_special_slots:
+                    failures.append(
+                        f"Active special polling stations ({active_special_stations}) exceed active configured slots ({active_special_slots})"
+                    )
+
+                unassigned_active_slots = cur.execute("""
+                    SELECT COUNT(*) AS n
+                    FROM special_voting_slots
+                    WHERE election_id=%s
+                      AND slot_status='ACTIVE'
+                      AND official_polling_station_code IS NOT NULL
+                      AND registered_voters IS NULL
+                """, (args.election_id,)).fetchone()["n"]
+                if unassigned_active_slots:
+                    failures.append(
+                        f"Active special slots with an official station code but no registered-voter value: {unassigned_active_slots}"
+                    )
+
+                special_location_errors = cur.execute("""
+                    SELECT COUNT(*) AS n
+                    FROM polling_stations
+                    WHERE election_id=%s
+                      AND (
+                        (location_type='NORMAL' AND (registration_centre_id IS NULL OR special_voting_area_id IS NOT NULL))
+                        OR
+                        (location_type='SPECIAL' AND (registration_centre_id IS NOT NULL OR special_voting_area_id IS NULL))
+                      )
+                """,(args.election_id,)).fetchone()["n"]
+                if special_location_errors:
+                    failures.append(f"Polling station location classification errors: {special_location_errors}")
+
+                regionless_counties = cur.execute("""
+                    SELECT COUNT(*) AS n FROM counties c
+                    LEFT JOIN county_region_assignments cra ON cra.county_id=c.county_id
+                    WHERE cra.county_id IS NULL
+                """).fetchone()["n"]
+                if regionless_counties:
+                    failures.append(f"Counties without a geographic region classification: {regionless_counties}")
+
+                affiliation_errors = cur.execute("""
+                    SELECT COUNT(*) AS n
+                    FROM candidates c
+                    WHERE c.election_id=%s
+                      AND ((c.candidate_type='PARTY' AND c.party_id IS NULL)
+                        OR (c.candidate_type='INDEPENDENT' AND c.party_id IS NOT NULL)
+                        OR c.candidate_type NOT IN ('PARTY','INDEPENDENT'))
+                """,(args.election_id,)).fetchone()["n"]
+                if affiliation_errors:
+                    failures.append(f"Candidate affiliation errors: {affiliation_errors}")
+
+                missing_party_symbols = cur.execute("""
+                    SELECT COUNT(*) AS n
+                    FROM candidates c
+                    LEFT JOIN party_symbols ps ON ps.party_id=c.party_id AND ps.approved=TRUE
+                    WHERE c.election_id=%s AND c.candidate_type='PARTY' AND ps.party_symbol_id IS NULL
+                """,(args.election_id,)).fetchone()["n"]
+                if missing_party_symbols:
+                    failures.append(f"Party candidates without an approved party symbol: {missing_party_symbols}")
+
+                missing_independent_symbols = cur.execute("""
+                    SELECT COUNT(*) AS n
+                    FROM candidates c
+                    LEFT JOIN independent_candidate_symbols s
+                      ON s.candidate_id=c.candidate_id AND s.election_id=c.election_id
+                    WHERE c.election_id=%s AND c.candidate_type='INDEPENDENT'
+                      AND (s.independent_symbol_id IS NULL OR s.approved=FALSE)
+                """,(args.election_id,)).fetchone()["n"]
+                if missing_independent_symbols:
+                    failures.append(f"Independent candidates without approved symbol records: {missing_independent_symbols}")
+
+                candidate_area_errors = cur.execute("""
+                    SELECT COUNT(*) AS n
+                    FROM candidate_electoral_areas cea
+                    JOIN candidates c ON c.candidate_id=cea.candidate_id AND c.election_id=cea.election_id
+                    JOIN positions p ON p.position_id=cea.position_id
+                    WHERE cea.election_id=%s
+                      AND (cea.position_id IS DISTINCT FROM c.position_id
+                           OR cea.candidate_type IS DISTINCT FROM c.candidate_type
+                           OR cea.party_id IS DISTINCT FROM c.party_id
+                           OR cea.electoral_area_type IS DISTINCT FROM p.geography_level)
+                """,(args.election_id,)).fetchone()["n"]
+                if candidate_area_errors:
+                    failures.append(f"Candidate electoral-area assignment errors: {candidate_area_errors}")
+
+                party_slot_duplicates = cur.execute("""
+                    SELECT COUNT(*) AS n FROM (
+                        SELECT election_id,position_id,electoral_area_type,electoral_area_id,party_id
+                        FROM candidate_electoral_areas
+                        WHERE election_id=%s AND candidate_type='PARTY'
+                        GROUP BY election_id,position_id,electoral_area_type,electoral_area_id,party_id
+                        HAVING COUNT(*)>1
+                    ) d
+                """,(args.election_id,)).fetchone()["n"]
+                if party_slot_duplicates:
+                    failures.append(f"Duplicate party candidate slots: {party_slot_duplicates}")
+
+                candidate_area_station_mismatches = cur.execute("""
+                    SELECT COUNT(*) AS n
+                    FROM result_submissions rs
+                    JOIN polling_stations ps ON ps.polling_station_id=rs.polling_station_id AND ps.election_id=rs.election_id
+                    JOIN candidate_electoral_areas cea
+                      ON cea.candidate_id=rs.candidate_id AND cea.election_id=rs.election_id AND cea.position_id=rs.position_id
+                    LEFT JOIN registration_centres rc ON rc.registration_centre_id=ps.registration_centre_id
+                    LEFT JOIN wards w ON w.ward_id=rc.ward_id
+                    LEFT JOIN constituencies con ON con.constituency_id=w.constituency_id
+                    LEFT JOIN counties co ON co.county_id=con.county_id
+                    JOIN positions p ON p.position_id=rs.position_id
+                    WHERE rs.election_id=%s AND ps.location_type='NORMAL'
+                      AND NOT (
+                        cea.electoral_area_type=p.geography_level
+                        AND cea.electoral_area_id=CASE p.geography_level
+                            WHEN 'NATIONAL' THEN 'NATIONAL'
+                            WHEN 'COUNTY' THEN co.county_id
+                            WHEN 'CONSTITUENCY' THEN con.constituency_id
+                            WHEN 'WARD' THEN w.ward_id
+                        END
+                      )
+                """,(args.election_id,)).fetchone()["n"]
+                if candidate_area_station_mismatches:
+                    failures.append(f"Result candidate/station electoral-area mismatches: {candidate_area_station_mismatches}")
+
+                missing_interval = cur.execute(
+                    """
+                    SELECT COUNT(*) AS n
+                    FROM polling_stations ps
+                    LEFT JOIN turnout_reporting_intervals tri
+                      ON tri.election_id = ps.election_id
+                     AND tri.polling_station_id = ps.polling_station_id
+                     AND tri.effective_to IS NULL
+                    WHERE ps.election_id = %s
+                      AND tri.turnout_interval_id IS NULL
+                    """,
+                    (args.election_id,),
+                ).fetchone()["n"]
+                if missing_interval:
+                    failures.append(f"Polling stations without a current turnout interval: {missing_interval}")
+
+                interval_window_mismatch = cur.execute(
+                    """
+                    SELECT COUNT(*) AS n
+                    FROM turnout_observations t
+                    JOIN turnout_reporting_intervals tri
+                      ON tri.turnout_interval_id = t.interval_configuration_id
+                    WHERE t.election_id = %s
+                      AND (tri.effective_from > t.observed_at
+                           OR (tri.effective_to IS NOT NULL AND t.observed_at >= tri.effective_to))
+                    """,
+                    (args.election_id,),
+                ).fetchone()["n"]
+                if interval_window_mismatch:
+                    failures.append(f"Turnout observations outside their recorded interval configuration: {interval_window_mismatch}")
+
+                missing_interval_reference = cur.execute(
+                    """
+                    SELECT COUNT(*) AS n
+                    FROM turnout_observations t
+                    LEFT JOIN turnout_reporting_intervals tri
+                      ON tri.turnout_interval_id = t.interval_configuration_id
+                    WHERE t.election_id = %s
+                      AND tri.turnout_interval_id IS NULL
+                    """,
+                    (args.election_id,),
+                ).fetchone()["n"]
+                if missing_interval_reference:
+                    failures.append(f"Turnout observations without interval configuration: {missing_interval_reference}")
 
                 orphan = cur.execute(
                     """
@@ -183,6 +502,12 @@ def main() -> int:
 
                 print("SCHEMA CONTRACT: PASS")
                 print("POSITION RELATIONSHIPS: PASS")
+                print("CANDIDATE PARTY/INDEPENDENT SYMBOL MODEL: PASS")
+                print("KENYA 8-REGION / 47-COUNTY / 290-CONSTITUENCY REFERENCE LAYER: PASS")
+                print("DIASPORA / PRISONS CONFIGURABLE SLOT MODEL: PASS")
+                print("2022 SPECIAL-VOTING REFERENCE LAYER: PASS")
+                print("TURNOUT INTERVAL CONFIGURATION: PASS")
+                print("TURNOUT OBSERVATION/INTERVAL ALIGNMENT: PASS")
                 print("RESULT/CANDIDATE POSITION ALIGNMENT: PASS")
                 print("RESULT SUBMISSION HASH PRESENCE: PASS")
                 print("CONSISTENCY: PASS")

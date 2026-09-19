@@ -193,7 +193,35 @@ CREATE TABLE elections (
 
 /*
 ===============================================================================
-2. COUNTIES
+2. KENYA GEOGRAPHIC REGIONS
+===============================================================================
+
+ETVS keeps Kenya's eight traditional regions as a geographic reference layer.
+They are NOT electoral seats and are deliberately kept outside the political
+contest hierarchy (county -> constituency -> ward -> polling station).
+
+A separate mapping table can associate counties with a region for geographic
+reporting without making a region a political seat or contest level.
+===============================================================================
+*/
+
+CREATE TABLE regions (
+    region_id TEXT PRIMARY KEY,
+
+    region_name TEXT NOT NULL UNIQUE,
+
+    region_type TEXT NOT NULL DEFAULT 'FORMER_PROVINCE',
+
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT region_type_check
+        CHECK (region_type IN ('FORMER_PROVINCE', 'REFERENCE_REGION', 'OTHER'))
+);
+
+
+/*
+===============================================================================
+3. COUNTIES
 ===============================================================================
 */
 
@@ -206,9 +234,30 @@ CREATE TABLE counties (
 );
 
 
+CREATE TABLE county_region_assignments (
+    county_id TEXT PRIMARY KEY,
+
+    region_id TEXT NOT NULL,
+
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT fk_county_region_county
+        FOREIGN KEY (county_id)
+        REFERENCES counties(county_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT,
+
+    CONSTRAINT fk_county_region_region
+        FOREIGN KEY (region_id)
+        REFERENCES regions(region_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT
+);
+
+
 /*
 ===============================================================================
-3. CONSTITUENCIES
+4. CONSTITUENCIES
 ===============================================================================
 */
 
@@ -234,7 +283,7 @@ CREATE TABLE constituencies (
 
 /*
 ===============================================================================
-4. WARDS
+5. WARDS
 ===============================================================================
 */
 
@@ -260,7 +309,7 @@ CREATE TABLE wards (
 
 /*
 ===============================================================================
-5. REGISTRATION CENTRES
+6. REGISTRATION CENTRES
 ===============================================================================
 
 A registration centre represents the relatively stable administrative or
@@ -315,7 +364,189 @@ CREATE TABLE registration_centres (
 
 /*
 ===============================================================================
-6. POLLING STATIONS
+7. SPECIAL VOTING AREAS
+===============================================================================
+
+Diaspora and prisons are not counties, constituencies, wards or political seats.
+They are represented as special voting areas so the normal Kenya geographic
+hierarchy is not distorted. Election-specific polling stations can later be
+attached to these areas using official Gazette data.
+===============================================================================
+*/
+
+CREATE TABLE special_voting_areas (
+    special_voting_area_id TEXT PRIMARY KEY,
+    election_id TEXT NOT NULL,
+    area_code TEXT NOT NULL,
+    area_name TEXT NOT NULL,
+    voting_category TEXT NOT NULL,
+    country_name TEXT,
+    source_document_id BIGINT,
+    notes TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT fk_special_area_election
+        FOREIGN KEY (election_id) REFERENCES elections(election_id)
+        ON UPDATE CASCADE ON DELETE RESTRICT,
+
+    CONSTRAINT fk_special_area_source
+        FOREIGN KEY (source_document_id) REFERENCES source_documents(document_id)
+        ON UPDATE CASCADE ON DELETE RESTRICT,
+
+    CONSTRAINT special_voting_category_check
+        CHECK (voting_category IN ('DIASPORA','PRISON')),
+
+    CONSTRAINT unique_special_area
+        UNIQUE (election_id, area_code, country_name)
+);
+
+
+CREATE INDEX idx_special_voting_areas_election
+    ON special_voting_areas(election_id, voting_category);
+
+
+/*
+===============================================================================
+7B. SPECIAL VOTING AREA SLOTS AND HISTORICAL REFERENCE STATIONS
+===============================================================================
+
+SPECIAL VOTING SLOTS
+--------------------
+Special voting locations are election-specific and may increase, decrease,
+move, or be retired between elections. ETVS therefore does not hard-code the
+number of active diaspora or prison polling stations into the election model.
+
+A slot is a configurable place-holder for an election-specific special polling
+station. Slots can be added or retired without changing the schema.
+
+HISTORICAL REFERENCE STATIONS
+-----------------------------
+Historical IEBC station records are kept separately as source/reference data.
+They are never automatically treated as the active configuration for a future
+election.
+===============================================================================
+*/
+
+CREATE TABLE special_voting_slots (
+    special_voting_slot_id BIGINT
+        GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+
+    election_id TEXT NOT NULL,
+
+    special_voting_area_id TEXT NOT NULL,
+
+    slot_code TEXT NOT NULL,
+
+    slot_number INTEGER NOT NULL,
+
+    slot_status TEXT NOT NULL DEFAULT 'PLANNED',
+
+    location_label TEXT,
+
+    country_name TEXT,
+
+    official_polling_station_code TEXT,
+
+    registered_voters INTEGER,
+
+    source_document_id BIGINT,
+
+    notes TEXT,
+
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT fk_special_slot_election
+        FOREIGN KEY (election_id)
+        REFERENCES elections(election_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT,
+
+    CONSTRAINT fk_special_slot_area
+        FOREIGN KEY (special_voting_area_id)
+        REFERENCES special_voting_areas(special_voting_area_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT,
+
+    CONSTRAINT fk_special_slot_source
+        FOREIGN KEY (source_document_id)
+        REFERENCES source_documents(document_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT,
+
+    CONSTRAINT special_slot_status_check
+        CHECK (slot_status IN ('PLANNED','ACTIVE','SUSPENDED','RETIRED')),
+
+    CONSTRAINT special_slot_number_positive
+        CHECK (slot_number > 0),
+
+    CONSTRAINT special_slot_registered_non_negative
+        CHECK (registered_voters IS NULL OR registered_voters >= 0),
+
+    CONSTRAINT unique_special_slot_code
+        UNIQUE (election_id, slot_code),
+
+    CONSTRAINT unique_special_slot_number
+        UNIQUE (election_id, special_voting_area_id, slot_number),
+
+    CONSTRAINT unique_special_slot_area_pair
+        UNIQUE (special_voting_slot_id, special_voting_area_id)
+);
+
+CREATE INDEX idx_special_voting_slots_area
+    ON special_voting_slots(election_id, special_voting_area_id, slot_status);
+
+
+CREATE TABLE special_voting_area_reference_stations (
+    reference_station_id BIGINT
+        GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+
+    special_voting_area_id TEXT NOT NULL,
+
+    reference_year INTEGER NOT NULL,
+
+    registration_centre_code TEXT,
+
+    polling_station_code TEXT NOT NULL,
+
+    polling_station_name TEXT,
+
+    registered_voters INTEGER,
+
+    source_document_id BIGINT,
+
+    notes TEXT,
+
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT fk_special_reference_area
+        FOREIGN KEY (special_voting_area_id)
+        REFERENCES special_voting_areas(special_voting_area_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT,
+
+    CONSTRAINT fk_special_reference_source
+        FOREIGN KEY (source_document_id)
+        REFERENCES source_documents(document_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT,
+
+    CONSTRAINT special_reference_year_check
+        CHECK (reference_year >= 2012),
+
+    CONSTRAINT special_reference_voters_non_negative
+        CHECK (registered_voters IS NULL OR registered_voters >= 0),
+
+    CONSTRAINT unique_special_reference_station
+        UNIQUE (special_voting_area_id, reference_year, polling_station_code)
+);
+
+CREATE INDEX idx_special_reference_station_area
+    ON special_voting_area_reference_stations(special_voting_area_id, reference_year);
+
+
+/*
+===============================================================================
+7. POLLING STATIONS
 ===============================================================================
 
 A polling station represents the election-specific use/assignment of a
@@ -359,7 +590,13 @@ CREATE TABLE polling_stations (
 
     election_id TEXT NOT NULL,
 
-    registration_centre_id TEXT NOT NULL,
+    registration_centre_id TEXT,
+
+    special_voting_area_id TEXT,
+
+    special_voting_slot_id BIGINT,
+
+    location_type TEXT NOT NULL DEFAULT 'NORMAL',
 
     polling_station_code TEXT NOT NULL,
 
@@ -379,6 +616,36 @@ CREATE TABLE polling_stations (
         ON UPDATE CASCADE
         ON DELETE RESTRICT,
 
+    CONSTRAINT fk_polling_station_special_area
+        FOREIGN KEY (special_voting_area_id)
+        REFERENCES special_voting_areas(special_voting_area_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT,
+
+    CONSTRAINT fk_polling_station_special_slot
+        FOREIGN KEY (special_voting_slot_id)
+        REFERENCES special_voting_slots(special_voting_slot_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT,
+
+    CONSTRAINT fk_polling_station_special_slot_area
+        FOREIGN KEY (special_voting_slot_id, special_voting_area_id)
+        REFERENCES special_voting_slots(special_voting_slot_id, special_voting_area_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT,
+
+    CONSTRAINT polling_station_location_type_check
+        CHECK (location_type IN ('NORMAL','SPECIAL')),
+
+    CONSTRAINT polling_station_location_exclusivity
+        CHECK (
+            (location_type = 'NORMAL' AND registration_centre_id IS NOT NULL AND special_voting_area_id IS NULL)
+            OR
+            (location_type = 'SPECIAL' AND registration_centre_id IS NULL
+             AND special_voting_area_id IS NOT NULL
+             AND special_voting_slot_id IS NOT NULL)
+        ),
+
     CONSTRAINT polling_station_registered_voters_non_negative
         CHECK (registered_voters >= 0),
 
@@ -392,7 +659,72 @@ CREATE TABLE polling_stations (
 
 /*
 ===============================================================================
-7. CANDIDATES
+8. TURNOUT REPORTING INTERVAL CONFIGURATION
+===============================================================================
+
+Each polling station may define its own expected interval for entering turnout
+observations. Configuration is election-specific and time-versioned so changing
+a station's interval never rewrites historical configuration used by earlier
+observations.
+
+Only one current configuration may exist for a polling station at a time.
+Historical configurations remain available for audit and provenance.
+===============================================================================
+*/
+
+CREATE TABLE turnout_reporting_intervals (
+    turnout_interval_id BIGINT
+        GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+
+    election_id TEXT NOT NULL,
+
+    polling_station_id TEXT NOT NULL,
+
+    interval_minutes INTEGER NOT NULL,
+
+    effective_from TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    effective_to TIMESTAMPTZ,
+
+    reporting_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT fk_turnout_interval_election
+        FOREIGN KEY (election_id)
+        REFERENCES elections(election_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT,
+
+    CONSTRAINT fk_turnout_interval_station_election
+        FOREIGN KEY (polling_station_id, election_id)
+        REFERENCES polling_stations(polling_station_id, election_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT,
+
+    CONSTRAINT turnout_interval_positive
+        CHECK (interval_minutes > 0),
+
+    CONSTRAINT turnout_interval_effective_window
+        CHECK (effective_to IS NULL OR effective_to > effective_from),
+
+    CONSTRAINT unique_turnout_interval_start
+        UNIQUE (election_id, polling_station_id, effective_from)
+);
+
+
+CREATE UNIQUE INDEX uq_turnout_interval_current
+    ON turnout_reporting_intervals(election_id, polling_station_id)
+    WHERE effective_to IS NULL;
+
+
+CREATE INDEX idx_turnout_interval_history
+    ON turnout_reporting_intervals(election_id, polling_station_id, effective_from DESC);
+
+
+/*
+===============================================================================
+9. CANDIDATES
 ===============================================================================
 
 Candidates belong to a particular election.
@@ -425,6 +757,120 @@ CREATE TABLE positions (
         CHECK (geography_level IN ('NATIONAL', 'COUNTY', 'CONSTITUENCY', 'WARD'))
 );
 
+
+/*
+===============================================================================
+7A. SPECIAL-AREA CONTEST REFERENCE RULES
+===============================================================================
+
+This table stores historical or future eligibility rules independently from the
+active election row. This is important because historical 2022 voting rules
+must not be silently applied to the 2027 election.
+
+For example, 2022 IEBC material records presidential voting for the diaspora
+and prison special-voting categories. A future 2027 rule must be loaded as its
+own reference-year record from the applicable official legal/Gazette material.
+===============================================================================
+*/
+
+CREATE TABLE special_area_contest_rules (
+    special_area_contest_rule_id BIGINT
+        GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+
+    special_voting_area_id TEXT NOT NULL,
+
+    position_id TEXT NOT NULL,
+
+    reference_year INTEGER NOT NULL,
+
+    eligibility_status TEXT NOT NULL,
+
+    source_document_id BIGINT,
+
+    notes TEXT,
+
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT fk_special_rule_area
+        FOREIGN KEY (special_voting_area_id)
+        REFERENCES special_voting_areas(special_voting_area_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT,
+
+    CONSTRAINT fk_special_rule_position
+        FOREIGN KEY (position_id)
+        REFERENCES positions(position_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT,
+
+    CONSTRAINT fk_special_rule_source
+        FOREIGN KEY (source_document_id)
+        REFERENCES source_documents(document_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT,
+
+    CONSTRAINT special_rule_status_check
+        CHECK (eligibility_status IN ('ALLOWED','NOT_ELIGIBLE')),
+
+    CONSTRAINT special_rule_year_check
+        CHECK (reference_year >= 2012),
+
+    CONSTRAINT unique_special_area_contest_rule
+        UNIQUE (special_voting_area_id, position_id, reference_year)
+);
+
+CREATE INDEX idx_special_area_contest_rules_year
+    ON special_area_contest_rules(reference_year, special_voting_area_id);
+
+CREATE TABLE political_parties (
+    party_id TEXT PRIMARY KEY,
+
+    party_name TEXT NOT NULL UNIQUE,
+
+    party_abbreviation TEXT,
+
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT unique_party_abbreviation UNIQUE (party_abbreviation)
+);
+
+
+CREATE TABLE party_symbols (
+    party_symbol_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+
+    party_id TEXT NOT NULL,
+
+    symbol_name TEXT NOT NULL,
+
+    symbol_uri TEXT,
+
+    approved BOOLEAN NOT NULL DEFAULT TRUE,
+
+    effective_from DATE,
+
+    effective_to DATE,
+
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT fk_party_symbol_party
+        FOREIGN KEY (party_id)
+        REFERENCES political_parties(party_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT,
+
+    CONSTRAINT party_symbol_effective_window
+        CHECK (effective_to IS NULL OR effective_from IS NULL OR effective_to > effective_from),
+
+    CONSTRAINT unique_party_symbol_name
+        UNIQUE (party_id, symbol_name)
+);
+
+
+CREATE UNIQUE INDEX uq_party_symbol_current
+    ON party_symbols(party_id)
+    WHERE effective_to IS NULL;
+
+
 CREATE TABLE candidates (
     candidate_id TEXT PRIMARY KEY,
 
@@ -435,6 +881,10 @@ CREATE TABLE candidates (
     office TEXT NOT NULL,
 
     position_id TEXT,
+
+    candidate_type TEXT NOT NULL DEFAULT 'PARTY',
+
+    party_id TEXT,
 
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
@@ -450,13 +900,176 @@ CREATE TABLE candidates (
         ON UPDATE CASCADE
         ON DELETE RESTRICT,
 
-    CONSTRAINT unique_candidate_per_election
-        UNIQUE (election_id, candidate_name, office),
+    CONSTRAINT fk_candidate_party
+        FOREIGN KEY (party_id)
+        REFERENCES political_parties(party_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT,
+
+    CONSTRAINT candidate_type_check
+        CHECK (candidate_type IN ('PARTY', 'INDEPENDENT')),
+
+    CONSTRAINT candidate_party_affiliation_check
+        CHECK ((candidate_type = 'PARTY' AND party_id IS NOT NULL)
+            OR (candidate_type = 'INDEPENDENT' AND party_id IS NULL)),
 
     CONSTRAINT unique_candidate_election_pair
         UNIQUE (candidate_id, election_id)
 );
 
+
+CREATE TABLE independent_candidate_symbols (
+    independent_symbol_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+
+    candidate_id TEXT NOT NULL UNIQUE,
+
+    election_id TEXT NOT NULL,
+
+    symbol_name TEXT NOT NULL,
+
+    symbol_uri TEXT,
+
+    approved BOOLEAN NOT NULL DEFAULT TRUE,
+
+    approved_at TIMESTAMPTZ,
+
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT fk_independent_symbol_candidate
+        FOREIGN KEY (candidate_id, election_id)
+        REFERENCES candidates(candidate_id, election_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT,
+
+    CONSTRAINT independent_symbol_candidate_type_check
+        CHECK (candidate_id IS NOT NULL)
+);
+
+
+/*
+===============================================================================
+8A. CANDIDATE ELECTORAL-AREA ASSIGNMENTS
+===============================================================================
+
+A candidate is contest-specific and electoral-area-specific. The Elections Act
+and Elections (General) Regulations define an electoral area as a constituency,
+county or ward; the presidential contest is national. ETVS therefore records
+which area a candidate is nominated for instead of treating a candidate as
+valid for every polling station in an election.
+
+For party candidates, the same party may have one candidate slot per applicable
+contest and electoral area. Independent candidates are also tied to their
+specific contest and area, with no party slot.
+===============================================================================
+*/
+
+CREATE TABLE candidate_electoral_areas (
+    candidate_electoral_area_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+
+    candidate_id TEXT NOT NULL,
+    election_id TEXT NOT NULL,
+    position_id TEXT NOT NULL,
+    electoral_area_type TEXT NOT NULL,
+    electoral_area_id TEXT NOT NULL,
+    candidate_type TEXT NOT NULL,
+    party_id TEXT,
+
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT fk_candidate_area_candidate
+        FOREIGN KEY (candidate_id, election_id)
+        REFERENCES candidates(candidate_id, election_id)
+        ON UPDATE CASCADE ON DELETE RESTRICT,
+
+    CONSTRAINT fk_candidate_area_position
+        FOREIGN KEY (position_id)
+        REFERENCES positions(position_id)
+        ON UPDATE CASCADE ON DELETE RESTRICT,
+
+    CONSTRAINT fk_candidate_area_party
+        FOREIGN KEY (party_id)
+        REFERENCES political_parties(party_id)
+        ON UPDATE CASCADE ON DELETE RESTRICT,
+
+    CONSTRAINT candidate_area_type_check
+        CHECK (electoral_area_type IN ('NATIONAL','COUNTY','CONSTITUENCY','WARD')),
+
+    CONSTRAINT candidate_area_candidate_type_check
+        CHECK (candidate_type IN ('PARTY','INDEPENDENT')),
+
+    CONSTRAINT candidate_area_party_check
+        CHECK ((candidate_type='PARTY' AND party_id IS NOT NULL)
+            OR (candidate_type='INDEPENDENT' AND party_id IS NULL)),
+
+    CONSTRAINT unique_candidate_area_assignment
+        UNIQUE (candidate_id, election_id)
+);
+
+CREATE UNIQUE INDEX uq_party_candidate_slot
+    ON candidate_electoral_areas(election_id, position_id, electoral_area_type, electoral_area_id, party_id)
+    WHERE candidate_type='PARTY';
+
+CREATE INDEX idx_candidate_area_lookup
+    ON candidate_electoral_areas(election_id, position_id, electoral_area_type, electoral_area_id);
+
+CREATE OR REPLACE FUNCTION validate_candidate_electoral_area()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $etvs$
+DECLARE
+    expected_geography TEXT;
+    candidate_position TEXT;
+    candidate_party TEXT;
+    candidate_kind TEXT;
+BEGIN
+    SELECT p.geography_level, c.position_id, c.party_id, c.candidate_type
+      INTO expected_geography, candidate_position, candidate_party, candidate_kind
+      FROM candidates c
+      JOIN positions p ON p.position_id=c.position_id
+     WHERE c.candidate_id=NEW.candidate_id
+       AND c.election_id=NEW.election_id;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Candidate % does not belong to election %', NEW.candidate_id, NEW.election_id;
+    END IF;
+
+    IF NEW.position_id <> candidate_position THEN
+        RAISE EXCEPTION 'Candidate % is assigned to position %, not %', NEW.candidate_id, candidate_position, NEW.position_id;
+    END IF;
+
+    IF NEW.electoral_area_type <> expected_geography THEN
+        RAISE EXCEPTION 'Position % requires % electoral area, not %', NEW.position_id, expected_geography, NEW.electoral_area_type;
+    END IF;
+
+    IF NEW.candidate_type <> candidate_kind OR NEW.party_id IS DISTINCT FROM candidate_party THEN
+        RAISE EXCEPTION 'Candidate affiliation mismatch for %', NEW.candidate_id;
+    END IF;
+
+    IF NEW.electoral_area_type='NATIONAL' THEN
+        IF NEW.electoral_area_id <> 'NATIONAL' THEN
+            RAISE EXCEPTION 'National contests must use electoral area NATIONAL';
+        END IF;
+    ELSIF NEW.electoral_area_type='COUNTY' THEN
+        IF NOT EXISTS (SELECT 1 FROM counties WHERE county_id=NEW.electoral_area_id) THEN
+            RAISE EXCEPTION 'Unknown county electoral area %', NEW.electoral_area_id;
+        END IF;
+    ELSIF NEW.electoral_area_type='CONSTITUENCY' THEN
+        IF NOT EXISTS (SELECT 1 FROM constituencies WHERE constituency_id=NEW.electoral_area_id) THEN
+            RAISE EXCEPTION 'Unknown constituency electoral area %', NEW.electoral_area_id;
+        END IF;
+    ELSIF NEW.electoral_area_type='WARD' THEN
+        IF NOT EXISTS (SELECT 1 FROM wards WHERE ward_id=NEW.electoral_area_id) THEN
+            RAISE EXCEPTION 'Unknown ward electoral area %', NEW.electoral_area_id;
+        END IF;
+    END IF;
+
+    RETURN NEW;
+END;
+$etvs$;
+
+CREATE TRIGGER trg_validate_candidate_electoral_area
+BEFORE INSERT OR UPDATE ON candidate_electoral_areas
+FOR EACH ROW EXECUTE FUNCTION validate_candidate_electoral_area();
 
 CREATE TABLE source_submissions (
     source_submission_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -542,7 +1155,7 @@ CREATE INDEX idx_published_aggregate_lookup
 
 /*
 ===============================================================================
-8. TURNOUT OBSERVATIONS
+10. TURNOUT OBSERVATIONS
 ===============================================================================
 
 INDEPENDENT SOURCE OBSERVATION
@@ -575,6 +1188,8 @@ CREATE TABLE turnout_observations (
 
     observation_version INTEGER NOT NULL DEFAULT 1,
 
+    interval_configuration_id BIGINT,
+
     voters_turnout INTEGER NOT NULL,
 
     observed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -603,6 +1218,12 @@ CREATE TABLE turnout_observations (
     CONSTRAINT fk_turnout_source_document
         FOREIGN KEY (source_document_id)
         REFERENCES source_documents(document_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT,
+
+    CONSTRAINT fk_turnout_interval_configuration
+        FOREIGN KEY (interval_configuration_id)
+        REFERENCES turnout_reporting_intervals(turnout_interval_id)
         ON UPDATE CASCADE
         ON DELETE RESTRICT,
 
@@ -816,6 +1437,86 @@ CREATE TABLE result_submissions (
             result_version
         )
 );
+
+
+/* Enforce that a result candidate is valid for the polling station's contest area. */
+CREATE OR REPLACE FUNCTION validate_result_candidate_electoral_area()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $etvs$
+DECLARE
+    station_area_type TEXT;
+    station_area_id TEXT;
+    candidate_area_type TEXT;
+    candidate_area_id TEXT;
+BEGIN
+    SELECT p.geography_level,
+           CASE p.geography_level
+             WHEN 'NATIONAL' THEN 'NATIONAL'
+             WHEN 'COUNTY' THEN co.county_id
+             WHEN 'CONSTITUENCY' THEN co2.constituency_id
+             WHEN 'WARD' THEN w.ward_id
+           END
+      INTO station_area_type, station_area_id
+      FROM polling_stations ps
+      LEFT JOIN registration_centres rc ON rc.registration_centre_id=ps.registration_centre_id
+      LEFT JOIN wards w ON w.ward_id=rc.ward_id
+      LEFT JOIN constituencies co2 ON co2.constituency_id=w.constituency_id
+      LEFT JOIN counties co ON co.county_id=co2.county_id
+      JOIN positions p ON p.position_id=NEW.position_id
+     WHERE ps.polling_station_id=NEW.polling_station_id
+       AND ps.election_id=NEW.election_id;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Cannot resolve polling station % and position %', NEW.polling_station_id, NEW.position_id;
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM polling_stations ps
+        JOIN special_area_contest_rules sar
+          ON sar.special_voting_area_id=ps.special_voting_area_id
+         AND sar.position_id=NEW.position_id
+         AND sar.reference_year=(SELECT EXTRACT(YEAR FROM election_date)::INTEGER FROM elections WHERE election_id=NEW.election_id)
+         AND sar.eligibility_status='ALLOWED'
+        WHERE ps.polling_station_id=NEW.polling_station_id
+          AND ps.election_id=NEW.election_id
+          AND ps.location_type='SPECIAL'
+    ) THEN
+        RETURN NEW;
+    ELSIF EXISTS (
+        SELECT 1 FROM polling_stations
+        WHERE polling_station_id=NEW.polling_station_id
+          AND election_id=NEW.election_id
+          AND location_type='SPECIAL'
+    ) THEN
+        RAISE EXCEPTION 'Position % is not currently eligible at special polling station % for this election', NEW.position_id, NEW.polling_station_id;
+    END IF;
+
+    SELECT cea.electoral_area_type, cea.electoral_area_id
+      INTO candidate_area_type, candidate_area_id
+      FROM candidate_electoral_areas cea
+     WHERE cea.candidate_id=NEW.candidate_id
+       AND cea.election_id=NEW.election_id
+       AND cea.position_id=NEW.position_id;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Candidate % has no electoral-area assignment for position %', NEW.candidate_id, NEW.position_id;
+    END IF;
+
+    IF candidate_area_type <> station_area_type OR candidate_area_id <> station_area_id THEN
+        RAISE EXCEPTION 'Candidate % is not nominated for polling station % area (%:%); candidate area is (%:%)',
+            NEW.candidate_id, NEW.polling_station_id, station_area_type, station_area_id,
+            candidate_area_type, candidate_area_id;
+    END IF;
+
+    RETURN NEW;
+END;
+$etvs$;
+
+CREATE TRIGGER trg_validate_result_candidate_electoral_area
+BEFORE INSERT OR UPDATE ON result_submissions
+FOR EACH ROW EXECUTE FUNCTION validate_result_candidate_electoral_area();
 
 
 /*
@@ -1112,183 +1813,3 @@ CREATE TABLE audit_position_results (
 
 CREATE INDEX idx_audit_failed_station ON audit_failed_results(election_id, polling_station_id);
 CREATE INDEX idx_audit_failed_geography ON audit_failed_results(election_id, geography_level, geography_id);
-CREATE INDEX idx_source_comparisons_run ON source_comparisons(audit_run_id);
-CREATE INDEX idx_audit_findings_candidate ON audit_findings(election_id, candidate_id);
-CREATE INDEX idx_audit_findings_geography ON audit_findings(election_id, geography_level, geography_id);
-
-
-/*
-===============================================================================
-13. INDEXES
-===============================================================================
-
-Indexes improve lookup and audit-engine performance.
-
-They do not modify source data.
-
-===============================================================================
-*/
-
-CREATE INDEX idx_constituencies_county
-    ON constituencies(county_id);
-
-
-CREATE INDEX idx_wards_constituency
-    ON wards(constituency_id);
-
-
-CREATE INDEX idx_registration_centres_ward
-    ON registration_centres(ward_id);
-
-
-CREATE INDEX idx_polling_stations_election
-    ON polling_stations(election_id);
-
-
-CREATE INDEX idx_polling_stations_registration_centre
-    ON polling_stations(registration_centre_id);
-
-
-CREATE INDEX idx_polling_stations_election_centre
-    ON polling_stations(election_id, registration_centre_id);
-
-
-CREATE INDEX idx_turnout_election_station
-    ON turnout_observations(
-        election_id,
-        polling_station_id
-    );
-
-
-CREATE INDEX idx_turnout_source_document
-    ON turnout_observations(source_document_id);
-
-
-CREATE INDEX idx_ballot_election_station
-    ON ballot_accounting_observations(
-        election_id,
-        polling_station_id
-    );
-
-
-CREATE INDEX idx_ballot_source_document
-    ON ballot_accounting_observations(source_document_id);
-
-
-CREATE INDEX idx_results_election_station
-    ON result_submissions(
-        election_id,
-        polling_station_id
-    );
-
-
-CREATE INDEX idx_results_candidate
-    ON result_submissions(candidate_id);
-
-
-CREATE INDEX idx_results_position
-    ON result_submissions(position_id);
-
-
-CREATE INDEX idx_results_source_document
-    ON result_submissions(source_document_id);
-
-
-CREATE INDEX idx_results_submission_hash
-    ON result_submissions(submission_hash);
-
-
-CREATE INDEX idx_audit_runs_election
-    ON audit_runs(election_id);
-
-
-CREATE INDEX idx_audit_findings_run
-    ON audit_findings(audit_run_id);
-
-
-CREATE INDEX idx_audit_findings_election
-    ON audit_findings(election_id);
-
-
-CREATE INDEX idx_audit_findings_station
-    ON audit_findings(
-        election_id,
-        polling_station_id
-    );
-
-
-/*
-===============================================================================
-14. FINAL SCHEMA VERIFICATION
-===============================================================================
-
-After successfully executing this schema, run:
-
-    SELECT table_name
-    FROM information_schema.tables
-    WHERE table_schema = 'public'
-      AND table_type = 'BASE TABLE'
-    ORDER BY table_name;
-
-Expected tables:
-
-    audit_findings
-    audit_failed_results
-    audit_passed_results
-    audit_position_results
-    audit_runs
-    ballot_accounting_observations
-    candidates
-    positions
-    constituencies
-    counties
-    elections
-    polling_stations
-    registration_centres
-    result_submissions
-    source_documents
-    sources
-    source_comparisons
-    source_submissions
-    submission_validation_results
-    published_aggregate_totals
-    turnout_observations
-    wards
-
-===============================================================================
-*/
-
-
-/*
-===============================================================================
-15. FOREIGN KEY VERIFICATION
-===============================================================================
-
-Run this after creating the schema:
-
-    SELECT
-        tc.table_name,
-        kcu.column_name,
-        ccu.table_name AS referenced_table,
-        ccu.column_name AS referenced_column
-    FROM information_schema.table_constraints AS tc
-    JOIN information_schema.key_column_usage AS kcu
-        ON tc.constraint_name = kcu.constraint_name
-       AND tc.table_schema = kcu.table_schema
-    JOIN information_schema.constraint_column_usage AS ccu
-        ON ccu.constraint_name = tc.constraint_name
-       AND ccu.table_schema = tc.table_schema
-    WHERE tc.constraint_type = 'FOREIGN KEY'
-      AND tc.table_schema = 'public'
-    ORDER BY tc.table_name, kcu.column_name;
-
-===============================================================================
-*/
-
-
-/*
-===============================================================================
-END OF ETVS POSTGRESQL SCHEMA
-===============================================================================
-*/
-

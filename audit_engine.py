@@ -14,6 +14,8 @@ Design rules:
     R011  Registered-voter observations precede turnout observations.
     R012  Turnout observation precedes contest ballot accounting.
     R013  Contest ballot accounting precedes candidate result publication.
+    R014  Turnout observations follow the unique station reporting interval.
+    R015  Candidate result belongs to the polling station's electoral area.
 
 Important: turnout is deliberately NOT duplicated into six independent turnout
 figures. Every contest at a polling station references the same final turnout
@@ -85,6 +87,27 @@ def result_hash(election_id: str, station_id: str, candidate_id: str, version: i
 
 def ensure_runtime_columns(cur) -> None:
     """Keep old local databases executable while schema.sql/migrations catch up."""
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS turnout_reporting_intervals (
+            turnout_interval_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            election_id TEXT NOT NULL REFERENCES elections(election_id),
+            polling_station_id TEXT NOT NULL REFERENCES polling_stations(polling_station_id),
+            interval_minutes INTEGER NOT NULL CHECK (interval_minutes > 0),
+            effective_from TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            effective_to TIMESTAMPTZ,
+            reporting_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE (election_id, polling_station_id, effective_from),
+            CHECK (effective_to IS NULL OR effective_to > effective_from)
+        )
+    """)
+    cur.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_turnout_interval_current
+        ON turnout_reporting_intervals(election_id, polling_station_id)
+        WHERE effective_to IS NULL
+    """)
+    cur.execute("ALTER TABLE turnout_observations ADD COLUMN IF NOT EXISTS interval_configuration_id BIGINT")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_turnout_interval_configuration ON turnout_observations(interval_configuration_id)")
     cur.execute("ALTER TABLE turnout_observations ADD COLUMN IF NOT EXISTS observed_at TIMESTAMPTZ")
     cur.execute("ALTER TABLE turnout_observations ADD COLUMN IF NOT EXISTS source_document_id BIGINT")
     cur.execute("ALTER TABLE ballot_accounting_observations ADD COLUMN IF NOT EXISTS observed_at TIMESTAMPTZ")
@@ -196,6 +219,62 @@ def latest_station_contests(cur, election_id: str, station_ids: set[str]) -> lis
         WHERE ps.election_id=%s AND ps.polling_station_id=ANY(%s)
         ORDER BY ps.polling_station_id,b.position_id
     """,(election_id,election_id,election_id,election_id,election_id,list(station_ids))).fetchall()
+
+
+def turnout_interval_findings(cur,election_id:str,station_ids:set[str])->list[Finding]:
+    """Check each station's turnout-entry cadence against its configured interval.
+
+    The interval is station-specific and configuration is resolved by the
+    interval_configuration_id stored on each observation. Historical changes
+    therefore remain auditable instead of being judged against today's value.
+    """
+    if not station_ids:
+        return []
+    rows=cur.execute("""
+        SELECT t.polling_station_id,t.observation_version,t.voters_turnout,t.observed_at,
+               t.interval_configuration_id,c.turnout_interval_id,c.interval_minutes,c.reporting_enabled,
+               c.effective_from,c.effective_to
+        FROM turnout_observations t
+        LEFT JOIN turnout_reporting_intervals c
+          ON c.turnout_interval_id=t.interval_configuration_id
+        WHERE t.election_id=%s AND t.polling_station_id=ANY(%s)
+        ORDER BY t.polling_station_id,t.observation_version
+    """,(election_id,list(station_ids))).fetchall()
+    grouped={}
+    for r in rows: grouped.setdefault(r["polling_station_id"],[]).append(r)
+    out=[]
+    for station,items in grouped.items():
+        previous=None
+        for r in items:
+            if not r["reporting_enabled"] or r["interval_minutes"] is None:
+                previous=r
+                continue
+            new_configuration = previous is not None and previous["interval_configuration_id"] != r["interval_configuration_id"]
+            if previous is None or new_configuration:
+                gap_minutes=(r["observed_at"]-r["effective_from"]).total_seconds()/60 if r["effective_from"] else None
+                expected=r["interval_minutes"]
+                context="after the new interval configuration became effective" if new_configuration else "from the interval configuration start"
+                if gap_minutes is None:
+                    ok=False
+                    message=f"{station}: turnout observation v{r['observation_version']} has no usable interval start time."
+                else:
+                    ok=round(gap_minutes,6)==expected
+                    message=(f"{station}: turnout observation v{r['observation_version']} was recorded after {gap_minutes:g} minutes "
+                             f"{context}; configured interval is {expected} minutes.")
+                out.append(Finding("R014",PASSED if ok else WARNING,message,
+                    int(round(gap_minutes)) if gap_minutes is not None else None,expected,station,None,
+                    "POLLING_STATION",station,None,"Observed Minutes From Interval Start","Configured Interval Minutes"))
+            else:
+                gap_minutes=(r["observed_at"]-previous["observed_at"]).total_seconds()/60
+                expected=r["interval_minutes"]
+                ok=round(gap_minutes,6)==expected
+                message=(f"{station}: turnout entry v{r['observation_version']} was {gap_minutes:g} minutes after "
+                         f"v{previous['observation_version']}; configured interval is {expected} minutes.")
+                out.append(Finding("R014",PASSED if ok else WARNING,message,
+                    int(round(gap_minutes)),expected,station,None,"POLLING_STATION",station,None,
+                    "Observed Entry Interval Minutes","Configured Interval Minutes"))
+            previous=r
+    return out
 
 
 def result_changes(cur,election_id:str,station_ids:set[str],position_id:str|None,candidate_id:str|None)->list[Finding]:
@@ -315,6 +394,62 @@ def integrity_findings(cur,election_id:str,station_ids:set[str],position_id:str|
         out.append(Finding("R010",PASSED if ok else FAILED,
             f"{r['polling_station_id']} {r['position_id']} submission {r['result_submission_id']} hash is {'valid' if ok else 'invalid or missing'}.",
             1 if ok else 0,1,r["polling_station_id"],r["candidate_id"],"POLLING_STATION",r["polling_station_id"],r["position_id"],"Hash Validity","Required"))
+    return out
+
+
+def candidate_area_findings(cur,election_id:str,station_ids:set[str],position_id:str|None,candidate_id:str|None)->list[Finding]:
+    """Audit candidate-to-polling-station electoral-area alignment."""
+    rows=cur.execute("""
+        SELECT rs.polling_station_id,rs.candidate_id,rs.position_id,
+               cea.electoral_area_type candidate_area_type,cea.electoral_area_id candidate_area_id,
+               p.geography_level,
+               CASE p.geography_level
+                 WHEN 'NATIONAL' THEN 'NATIONAL'
+                 WHEN 'COUNTY' THEN co.county_id
+                 WHEN 'CONSTITUENCY' THEN con.constituency_id
+                 WHEN 'WARD' THEN w.ward_id
+               END station_area_id,
+               ps.location_type,ps.special_voting_area_id,
+               EXISTS (
+                   SELECT 1 FROM special_area_contest_rules sar
+                   JOIN elections e ON e.election_id=rs.election_id
+                   WHERE sar.special_voting_area_id=ps.special_voting_area_id
+                     AND sar.position_id=rs.position_id
+                     AND sar.reference_year=EXTRACT(YEAR FROM e.election_date)::INTEGER
+                     AND sar.eligibility_status='ALLOWED'
+               ) special_position_allowed
+        FROM result_submissions rs
+        JOIN polling_stations ps ON ps.polling_station_id=rs.polling_station_id AND ps.election_id=rs.election_id
+        JOIN positions p ON p.position_id=rs.position_id
+        LEFT JOIN registration_centres rc ON rc.registration_centre_id=ps.registration_centre_id
+        LEFT JOIN wards w ON w.ward_id=rc.ward_id
+        LEFT JOIN constituencies con ON con.constituency_id=w.constituency_id
+        LEFT JOIN counties co ON co.county_id=con.county_id
+        LEFT JOIN candidate_electoral_areas cea
+          ON cea.candidate_id=rs.candidate_id AND cea.election_id=rs.election_id AND cea.position_id=rs.position_id
+        WHERE rs.election_id=%s AND rs.polling_station_id=ANY(%s)
+        ORDER BY rs.result_submission_id
+    """,(election_id,list(station_ids))).fetchall()
+    out=[]
+    for r in rows:
+        if position_id and r["position_id"]!=position_id: continue
+        if candidate_id and r["candidate_id"]!=candidate_id: continue
+        if r["location_type"]=="SPECIAL":
+            ok=bool(r["special_position_allowed"])
+            message=(f"{r['polling_station_id']}: {r['position_id']} is {'eligible' if ok else 'not eligible'} "
+                     f"under the election-year special-area rule.")
+            out.append(Finding("R015",PASSED if ok else FAILED,message,1 if ok else 0,1,
+                r["polling_station_id"],r["candidate_id"],"POLLING_STATION",r["polling_station_id"],
+                r["position_id"],"Special-Area Eligibility","Required"))
+        else:
+            ok=(r["candidate_area_type"]==r["geography_level"] and r["candidate_area_id"]==r["station_area_id"])
+            message=(f"{r['polling_station_id']}: candidate {r['candidate_id']} area "
+                     f"{r['candidate_area_type']}:{r['candidate_area_id']} "
+                     f"{'matches' if ok else 'does not match'} the station's "
+                     f"{r['geography_level']}:{r['station_area_id']} area.")
+            out.append(Finding("R015",PASSED if ok else FAILED,message,1 if ok else 0,1,
+                r["polling_station_id"],r["candidate_id"],"POLLING_STATION",r["polling_station_id"],
+                r["position_id"],"Candidate Area Alignment","Required"))
     return out
 
 
@@ -464,6 +599,8 @@ def audit_election(election_id:str,scope:AuditScope)->tuple[int,list[dict],bool,
             if not rows:raise ValueError("No contest-specific ballot observations were found.")
             add_latest_result_times(cur,election_id,rows)
             findings=station_findings(rows,scope.position_id)
+            findings.extend(turnout_interval_findings(cur,election_id,stations))
+            findings.extend(candidate_area_findings(cur,election_id,stations,scope.position_id,scope.candidate_id))
             findings.extend(chronology_findings(rows,scope.position_id))
             findings.extend(result_changes(cur,election_id,stations,scope.position_id,scope.candidate_id))
             findings.extend(integrity_findings(cur,election_id,stations,scope.position_id,scope.candidate_id))
