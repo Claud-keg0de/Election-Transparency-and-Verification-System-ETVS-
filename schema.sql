@@ -364,6 +364,49 @@ CREATE TABLE registration_centres (
 
 /*
 ===============================================================================
+7. SPECIAL VOTING AREAS
+===============================================================================
+
+Diaspora and prisons are not counties, constituencies, wards or political seats.
+They are represented as special voting areas so the normal Kenya geographic
+hierarchy is not distorted. Election-specific polling stations can later be
+attached to these areas using official Gazette data.
+===============================================================================
+*/
+
+CREATE TABLE special_voting_areas (
+    special_voting_area_id TEXT PRIMARY KEY,
+    election_id TEXT NOT NULL,
+    area_code TEXT NOT NULL,
+    area_name TEXT NOT NULL,
+    voting_category TEXT NOT NULL,
+    country_name TEXT,
+    source_document_id BIGINT,
+    notes TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT fk_special_area_election
+        FOREIGN KEY (election_id) REFERENCES elections(election_id)
+        ON UPDATE CASCADE ON DELETE RESTRICT,
+
+    CONSTRAINT fk_special_area_source
+        FOREIGN KEY (source_document_id) REFERENCES source_documents(document_id)
+        ON UPDATE CASCADE ON DELETE RESTRICT,
+
+    CONSTRAINT special_voting_category_check
+        CHECK (voting_category IN ('DIASPORA','PRISON')),
+
+    CONSTRAINT unique_special_area
+        UNIQUE (election_id, area_code, country_name)
+);
+
+
+CREATE INDEX idx_special_voting_areas_election
+    ON special_voting_areas(election_id, voting_category);
+
+
+/*
+===============================================================================
 7. POLLING STATIONS
 ===============================================================================
 
@@ -408,7 +451,11 @@ CREATE TABLE polling_stations (
 
     election_id TEXT NOT NULL,
 
-    registration_centre_id TEXT NOT NULL,
+    registration_centre_id TEXT,
+
+    special_voting_area_id TEXT,
+
+    location_type TEXT NOT NULL DEFAULT 'NORMAL',
 
     polling_station_code TEXT NOT NULL,
 
@@ -427,6 +474,22 @@ CREATE TABLE polling_stations (
         REFERENCES registration_centres(registration_centre_id)
         ON UPDATE CASCADE
         ON DELETE RESTRICT,
+
+    CONSTRAINT fk_polling_station_special_area
+        FOREIGN KEY (special_voting_area_id)
+        REFERENCES special_voting_areas(special_voting_area_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT,
+
+    CONSTRAINT polling_station_location_type_check
+        CHECK (location_type IN ('NORMAL','SPECIAL')),
+
+    CONSTRAINT polling_station_location_exclusivity
+        CHECK (
+            (location_type = 'NORMAL' AND registration_centre_id IS NOT NULL AND special_voting_area_id IS NULL)
+            OR
+            (location_type = 'SPECIAL' AND registration_centre_id IS NULL AND special_voting_area_id IS NOT NULL)
+        ),
 
     CONSTRAINT polling_station_registered_voters_non_negative
         CHECK (registered_voters >= 0),
@@ -1363,6 +1426,9 @@ CREATE INDEX idx_polling_stations_election
 
 CREATE INDEX idx_polling_stations_registration_centre
     ON polling_stations(registration_centre_id);
+
+CREATE INDEX idx_polling_stations_special_area
+    ON polling_stations(special_voting_area_id);
 
 
 CREATE INDEX idx_polling_stations_election_centre
