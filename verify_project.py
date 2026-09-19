@@ -44,6 +44,10 @@ REQUIRED_COLUMNS = {
     "independent_candidate_symbols": {"independent_symbol_id", "candidate_id", "election_id", "symbol_name", "symbol_uri", "approved"},
     "positions": {"position_id", "position_name", "election_level", "geography_level"},
     "candidates": {"candidate_id", "election_id", "candidate_name", "office", "position_id", "candidate_type", "party_id"},
+    "candidate_electoral_areas": {
+        "candidate_electoral_area_id", "candidate_id", "election_id", "position_id",
+        "electoral_area_type", "electoral_area_id", "candidate_type", "party_id"
+    },
     "result_submissions": {
         "result_submission_id", "election_id", "polling_station_id",
         "candidate_id", "result_version", "votes", "position_id",
@@ -100,6 +104,9 @@ REQUIRED_FKS = {
     "fk_finding_position",
     "fk_turnout_interval_configuration",
     "fk_polling_station_special_slot",
+    "fk_candidate_area_candidate",
+    "fk_candidate_area_position",
+    "fk_candidate_area_party",
 }
 
 
@@ -188,6 +195,7 @@ def main() -> int:
                     ("independent_candidate_symbols", "SELECT COUNT(*) AS n FROM independent_candidate_symbols WHERE election_id = %s"),
                     ("positions", "SELECT COUNT(*) AS n FROM positions"),
                     ("candidates", "SELECT COUNT(*) AS n FROM candidates WHERE election_id = %s"),
+                    ("candidate_electoral_areas", "SELECT COUNT(*) AS n FROM candidate_electoral_areas WHERE election_id = %s"),
                     ("polling_stations", "SELECT COUNT(*) AS n FROM polling_stations WHERE election_id = %s"),
                     ("turnout_reporting_intervals", "SELECT COUNT(*) AS n FROM turnout_reporting_intervals WHERE election_id = %s"),
                     ("turnout_observations", "SELECT COUNT(*) AS n FROM turnout_observations WHERE election_id = %s"),
@@ -361,6 +369,57 @@ def main() -> int:
                 """,(args.election_id,)).fetchone()["n"]
                 if missing_independent_symbols:
                     failures.append(f"Independent candidates without approved symbol records: {missing_independent_symbols}")
+
+                candidate_area_errors = cur.execute("""
+                    SELECT COUNT(*) AS n
+                    FROM candidate_electoral_areas cea
+                    JOIN candidates c ON c.candidate_id=cea.candidate_id AND c.election_id=cea.election_id
+                    JOIN positions p ON p.position_id=cea.position_id
+                    WHERE cea.election_id=%s
+                      AND (cea.position_id IS DISTINCT FROM c.position_id
+                           OR cea.candidate_type IS DISTINCT FROM c.candidate_type
+                           OR cea.party_id IS DISTINCT FROM c.party_id
+                           OR cea.electoral_area_type IS DISTINCT FROM p.geography_level)
+                """,(args.election_id,)).fetchone()["n"]
+                if candidate_area_errors:
+                    failures.append(f"Candidate electoral-area assignment errors: {candidate_area_errors}")
+
+                party_slot_duplicates = cur.execute("""
+                    SELECT COUNT(*) AS n FROM (
+                        SELECT election_id,position_id,electoral_area_type,electoral_area_id,party_id
+                        FROM candidate_electoral_areas
+                        WHERE election_id=%s AND candidate_type='PARTY'
+                        GROUP BY election_id,position_id,electoral_area_type,electoral_area_id,party_id
+                        HAVING COUNT(*)>1
+                    ) d
+                """,(args.election_id,)).fetchone()["n"]
+                if party_slot_duplicates:
+                    failures.append(f"Duplicate party candidate slots: {party_slot_duplicates}")
+
+                candidate_area_station_mismatches = cur.execute("""
+                    SELECT COUNT(*) AS n
+                    FROM result_submissions rs
+                    JOIN polling_stations ps ON ps.polling_station_id=rs.polling_station_id AND ps.election_id=rs.election_id
+                    JOIN candidate_electoral_areas cea
+                      ON cea.candidate_id=rs.candidate_id AND cea.election_id=rs.election_id AND cea.position_id=rs.position_id
+                    LEFT JOIN registration_centres rc ON rc.registration_centre_id=ps.registration_centre_id
+                    LEFT JOIN wards w ON w.ward_id=rc.ward_id
+                    LEFT JOIN constituencies con ON con.constituency_id=w.constituency_id
+                    LEFT JOIN counties co ON co.county_id=con.county_id
+                    JOIN positions p ON p.position_id=rs.position_id
+                    WHERE rs.election_id=%s AND ps.location_type='NORMAL'
+                      AND NOT (
+                        cea.electoral_area_type=p.geography_level
+                        AND cea.electoral_area_id=CASE p.geography_level
+                            WHEN 'NATIONAL' THEN 'NATIONAL'
+                            WHEN 'COUNTY' THEN co.county_id
+                            WHEN 'CONSTITUENCY' THEN con.constituency_id
+                            WHEN 'WARD' THEN w.ward_id
+                        END
+                      )
+                """,(args.election_id,)).fetchone()["n"]
+                if candidate_area_station_mismatches:
+                    failures.append(f"Result candidate/station electoral-area mismatches: {candidate_area_station_mismatches}")
 
                 missing_interval = cur.execute(
                     """
