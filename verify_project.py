@@ -30,9 +30,15 @@ REQUIRED_COLUMNS = {
         "aggregation_level", "geography_id", "candidate_id", "position_id",
         "metric", "reported_value",
     },
+    "turnout_reporting_intervals": {
+        "turnout_interval_id", "election_id", "polling_station_id",
+        "interval_minutes", "effective_from", "effective_to",
+        "reporting_enabled", "created_at",
+    },
     "turnout_observations": {
         "turnout_observation_id", "election_id", "polling_station_id",
-        "observation_version", "voters_turnout", "source_document_id",
+        "observation_version", "interval_configuration_id", "voters_turnout",
+        "observed_at", "source_document_id",
     },
     "ballot_accounting_observations": {
         "ballot_accounting_observation_id", "election_id",
@@ -58,6 +64,7 @@ REQUIRED_FKS = {
     "fk_published_aggregate_position",
     "fk_audit_run_position",
     "fk_finding_position",
+    "fk_turnout_interval_configuration",
 }
 
 
@@ -138,6 +145,7 @@ def main() -> int:
                     ("positions", "SELECT COUNT(*) AS n FROM positions"),
                     ("candidates", "SELECT COUNT(*) AS n FROM candidates WHERE election_id = %s"),
                     ("polling_stations", "SELECT COUNT(*) AS n FROM polling_stations WHERE election_id = %s"),
+                    ("turnout_reporting_intervals", "SELECT COUNT(*) AS n FROM turnout_reporting_intervals WHERE election_id = %s"),
                     ("turnout_observations", "SELECT COUNT(*) AS n FROM turnout_observations WHERE election_id = %s"),
                     ("ballot_accounting_observations", "SELECT COUNT(*) AS n FROM ballot_accounting_observations WHERE election_id = %s"),
                     ("result_submissions", "SELECT COUNT(*) AS n FROM result_submissions WHERE election_id = %s"),
@@ -146,6 +154,51 @@ def main() -> int:
                 for label, sql in checks:
                     row = cur.execute(sql, (args.election_id,) if "%s" in sql else ()).fetchone()
                     print(f"{label:35} {row['n']}")
+
+                missing_interval = cur.execute(
+                    """
+                    SELECT COUNT(*) AS n
+                    FROM polling_stations ps
+                    LEFT JOIN turnout_reporting_intervals tri
+                      ON tri.election_id = ps.election_id
+                     AND tri.polling_station_id = ps.polling_station_id
+                     AND tri.effective_to IS NULL
+                    WHERE ps.election_id = %s
+                      AND tri.turnout_interval_id IS NULL
+                    """,
+                    (args.election_id,),
+                ).fetchone()["n"]
+                if missing_interval:
+                    failures.append(f"Polling stations without a current turnout interval: {missing_interval}")
+
+                interval_window_mismatch = cur.execute(
+                    """
+                    SELECT COUNT(*) AS n
+                    FROM turnout_observations t
+                    JOIN turnout_reporting_intervals tri
+                      ON tri.turnout_interval_id = t.interval_configuration_id
+                    WHERE t.election_id = %s
+                      AND (tri.effective_from > t.observed_at
+                           OR (tri.effective_to IS NOT NULL AND t.observed_at >= tri.effective_to))
+                    """,
+                    (args.election_id,),
+                ).fetchone()["n"]
+                if interval_window_mismatch:
+                    failures.append(f"Turnout observations outside their recorded interval configuration: {interval_window_mismatch}")
+
+                missing_interval_reference = cur.execute(
+                    """
+                    SELECT COUNT(*) AS n
+                    FROM turnout_observations t
+                    LEFT JOIN turnout_reporting_intervals tri
+                      ON tri.turnout_interval_id = t.interval_configuration_id
+                    WHERE t.election_id = %s
+                      AND tri.turnout_interval_id IS NULL
+                    """,
+                    (args.election_id,),
+                ).fetchone()["n"]
+                if missing_interval_reference:
+                    failures.append(f"Turnout observations without interval configuration: {missing_interval_reference}")
 
                 orphan = cur.execute(
                     """
@@ -183,6 +236,8 @@ def main() -> int:
 
                 print("SCHEMA CONTRACT: PASS")
                 print("POSITION RELATIONSHIPS: PASS")
+                print("TURNOUT INTERVAL CONFIGURATION: PASS")
+                print("TURNOUT OBSERVATION/INTERVAL ALIGNMENT: PASS")
                 print("RESULT/CANDIDATE POSITION ALIGNMENT: PASS")
                 print("RESULT SUBMISSION HASH PRESENCE: PASS")
                 print("CONSISTENCY: PASS")
