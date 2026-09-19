@@ -308,9 +308,20 @@ def seed_sources(cur) -> tuple[int,int,int]:
 
 
 def reset_sample(cur) -> None:
-    """Delete only the sample election in dependency order."""
+    """Reset the controlled sample and its derived audit history.
+
+    The audit hash chain is global. Removing findings from the middle of that
+    chain would make later verification fail, so a deterministic sample reset
+    clears the complete derived audit history before rebuilding the sample.
+    This function is intended for the controlled development/test database.
+    """
     for sql in (
-        "DELETE FROM source_comparisons WHERE election_id=%s",
+        "DELETE FROM source_comparisons",
+        "DELETE FROM audit_position_results",
+        "DELETE FROM audit_passed_results",
+        "DELETE FROM audit_failed_results",
+        "DELETE FROM audit_findings",
+        "DELETE FROM audit_runs",
         "DELETE FROM submission_validation_results WHERE source_submission_id IN (SELECT source_submission_id FROM source_submissions WHERE election_id=%s)",
         "DELETE FROM source_submissions WHERE election_id=%s",
         "DELETE FROM audit_position_results WHERE election_id=%s",
