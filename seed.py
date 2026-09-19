@@ -27,7 +27,7 @@ from getpass import getpass
 import psycopg
 from psycopg.rows import dict_row
 
-from kenya_reference_data import COUNTIES, CONSTITUENCIES, DIASPORA_STATIONS_2022, REGIONS
+from kenya_reference_data import COUNTIES, CONSTITUENCIES, DIASPORA_STATIONS_2022, PRISON_STATIONS_2022, REGIONS
 
 ELECTION_ID = "KE-PRES-2027"
 SOURCE_ID = "SRC-ETVS-SAMPLE"
@@ -509,18 +509,11 @@ def seed_master_data(cur) -> None:
 
 
 def seed_special_voting_areas(cur, source_document_id: int) -> None:
-    """Seed special-voting reference areas and historical diaspora stations.
+    """Seed historical 2022 special-voting reference areas and station rows.
 
-    The 2022 IEBC Gazette is historical reference data. It must not be used as
-    automatic 2027 contest eligibility or as a claim about future boundaries.
+    These records are historical reference data. They are not treated as
+    2027 contest eligibility.
     """
-    # Diaspora is modeled at country level because each country is a distinct
-    # special voting area in the source data. Prisons remain a national special
-    # voting area until the complete station-level prison schedule is loaded.
-    countries = {}
-    for _, country, _, _ in DIASPORA_STATIONS_2022:
-        countries.setdefault(country, None)
-
     country_codes = {
         "Tanzania": "05000",
         "Uganda": "05001",
@@ -536,20 +529,20 @@ def seed_special_voting_areas(cur, source_document_id: int) -> None:
         "United States of America": "05011",
     }
 
-    for country in countries:
+    for country in dict.fromkeys(country for _, country, _, _ in DIASPORA_STATIONS_2022):
         code = country_codes[country]
         cur.execute("""
             INSERT INTO special_voting_areas(
                 special_voting_area_id,election_id,area_code,area_name,
                 voting_category,country_name,source_document_id,notes
             )
-            VALUES(%s,%s,%s,%s,'DIASPORA',%s,%s,%s)
+            VALUES(%s,%s,%s,%s,'DIASPORA',%s,NULL,%s)
             ON CONFLICT(special_voting_area_id) DO UPDATE SET
                 area_code=EXCLUDED.area_code,
                 area_name=EXCLUDED.area_name,
                 voting_category=EXCLUDED.voting_category,
                 country_name=EXCLUDED.country_name,
-                source_document_id=EXCLUDED.source_document_id,
+                source_document_id=NULL,
                 notes=EXCLUDED.notes
         """, (
             f"SVA-DIA-{code}",
@@ -557,7 +550,6 @@ def seed_special_voting_areas(cur, source_document_id: int) -> None:
             code,
             country,
             country,
-            None,
             "Historical 2022 IEBC reference from https://www.iebc.or.ke/uploads/resources/L7k6ob1bau.pdf ; 2027 eligibility must come from the final 2027 legal/Gazette record.",
         ))
 
@@ -568,23 +560,22 @@ def seed_special_voting_areas(cur, source_document_id: int) -> None:
         )
         VALUES(
             'SVA-PRISONS',%s,'01451','Prisons','PRISON',NULL,NULL,
-            'Historical 2022 IEBC reference from https://www.iebc.or.ke/uploads/resources/L7k6ob1bau.pdf : 7,483 registered voters across 103 prison polling stations. Complete station-level prison schedule is added only from the authoritative source.'
+            'Historical 2022 IEBC Gazette reference from https://www.iebc.or.ke/uploads/resources/L7k6ob1bau.pdf : 7,483 registered voters across 106 Gazette polling-station rows. An IEBC polling-day press update separately referred to 103 prison polling stations; ETVS preserves this source discrepancy.'
         )
         ON CONFLICT(special_voting_area_id) DO UPDATE SET
             area_code=EXCLUDED.area_code,
             area_name=EXCLUDED.area_name,
             voting_category=EXCLUDED.voting_category,
             country_name=EXCLUDED.country_name,
-            source_document_id=EXCLUDED.source_document_id,
+            source_document_id=NULL,
             notes=EXCLUDED.notes
-    """, (ELECTION_ID, source_document_id))
+    """)
 
-    # Rebuild the historical diaspora station reference rows deterministically.
     cur.execute("""
         DELETE FROM polling_stations
         WHERE election_id=%s
           AND location_type='SPECIAL'
-          AND polling_station_id LIKE 'PS-DIA-%%'
+          AND (polling_station_id LIKE 'PS-DIA-%%' OR polling_station_id LIKE 'PS-PRISON-%%')
     """, (ELECTION_ID,))
 
     for index, (station_code, country, station_name, registered) in enumerate(DIASPORA_STATIONS_2022, 1):
@@ -605,7 +596,6 @@ def seed_special_voting_areas(cur, source_document_id: int) -> None:
                 polling_station_code=EXCLUDED.polling_station_code,
                 registered_voters=EXCLUDED.registered_voters
         """, (station_id, ELECTION_ID, area_id, station_code, registered))
-
         cur.execute("""
             INSERT INTO turnout_reporting_intervals(
                 election_id,polling_station_id,interval_minutes,effective_from,
@@ -615,12 +605,39 @@ def seed_special_voting_areas(cur, source_document_id: int) -> None:
             ON CONFLICT(election_id,polling_station_id,effective_from) DO UPDATE SET
                 interval_minutes=EXCLUDED.interval_minutes,
                 effective_to=NULL,
-                reporting_enabled=EXCLUDED.reporting_enabled
-        """, (
-            ELECTION_ID,
-            station_id,
-            datetime(2022, 8, 9, 5, 0, tzinfo=timezone.utc),
-        ))
+                reporting_enabled=FALSE
+        """, (ELECTION_ID, station_id, datetime(2022, 8, 9, 5, 0, tzinfo=timezone.utc)))
+
+    for index, (centre_code, station_name, registered) in enumerate(PRISON_STATIONS_2022, 1):
+        occurrence = 2 if sum(1 for code, _, _ in PRISON_STATIONS_2022[:index] if code == centre_code) == 2 else 1
+        station_code = f"0492921451{centre_code}{occurrence:02d}"
+        station_id = f"PS-PRISON-{index:03d}"
+        cur.execute("""
+            INSERT INTO polling_stations(
+                polling_station_id,election_id,registration_centre_id,
+                special_voting_area_id,location_type,polling_station_code,
+                registered_voters
+            )
+            VALUES(%s,%s,NULL,'SVA-PRISONS','SPECIAL',%s,%s)
+            ON CONFLICT(polling_station_id) DO UPDATE SET
+                election_id=EXCLUDED.election_id,
+                registration_centre_id=NULL,
+                special_voting_area_id='SVA-PRISONS',
+                location_type='SPECIAL',
+                polling_station_code=EXCLUDED.polling_station_code,
+                registered_voters=EXCLUDED.registered_voters
+        """, (station_id, ELECTION_ID, station_code, registered))
+        cur.execute("""
+            INSERT INTO turnout_reporting_intervals(
+                election_id,polling_station_id,interval_minutes,effective_from,
+                effective_to,reporting_enabled
+            )
+            VALUES(%s,%s,60,%s,NULL,FALSE)
+            ON CONFLICT(election_id,polling_station_id,effective_from) DO UPDATE SET
+                interval_minutes=EXCLUDED.interval_minutes,
+                effective_to=NULL,
+                reporting_enabled=FALSE
+        """, (ELECTION_ID, station_id, datetime(2022, 8, 9, 5, 0, tzinfo=timezone.utc)))
 
 def seed_turnout_intervals(cur) -> None:
     """Seed one independently configurable reporting interval for every station."""
