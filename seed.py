@@ -47,15 +47,16 @@ class StationSeed:
     centre_id: str
     registered: int
     turnout: int
+    turnout_interval_minutes: int
 
 
 STATIONS = (
-    StationSeed("PS001", "PS-001", "RC001", 1000, 700),
-    StationSeed("PS002", "PS-002", "RC002", 800, 500),
-    StationSeed("PS003", "PS-003", "RC003", 950, 1000),  # R001 anomaly
-    StationSeed("PS004", "PS-004", "RC004", 1200, 900),
-    StationSeed("PS005", "PS-005", "RC005", 600, 450),
-    StationSeed("PS006", "PS-006", "RC006", 700, 650),
+    StationSeed("PS001", "PS-001", "RC001", 1000, 700, 60),
+    StationSeed("PS002", "PS-002", "RC002", 800, 500, 30),
+    StationSeed("PS003", "PS-003", "RC003", 950, 1000, 120),  # R001 anomaly
+    StationSeed("PS004", "PS-004", "RC004", 1200, 900, 45),
+    StationSeed("PS005", "PS-005", "RC005", 600, 450, 240),
+    StationSeed("PS006", "PS-006", "RC006", 700, 650, 180),
 )
 
 # Each tuple is (valid, rejected, spoilt) for every contest at that station.
@@ -242,10 +243,11 @@ def seed_master_data(cur) -> None:
     for rid,name,wid in centres:cur.execute("INSERT INTO registration_centres(registration_centre_id,registration_centre_name,ward_id) VALUES(%s,%s,%s) ON CONFLICT DO NOTHING",(rid,name,wid))
     for s in STATIONS:
         cur.execute("""
-            INSERT INTO polling_stations(polling_station_id,election_id,registration_centre_id,polling_station_code,registered_voters)
-            VALUES(%s,%s,%s,%s,%s) ON CONFLICT(polling_station_id) DO UPDATE SET election_id=EXCLUDED.election_id,
-            registration_centre_id=EXCLUDED.registration_centre_id,polling_station_code=EXCLUDED.polling_station_code,registered_voters=EXCLUDED.registered_voters
-        """,(s.station_id,ELECTION_ID,s.centre_id,s.code,s.registered))
+            INSERT INTO polling_stations(polling_station_id,election_id,registration_centre_id,polling_station_code,registered_voters,turnout_reporting_interval_minutes)
+            VALUES(%s,%s,%s,%s,%s,%s) ON CONFLICT(polling_station_id) DO UPDATE SET election_id=EXCLUDED.election_id,
+            registration_centre_id=EXCLUDED.registration_centre_id,polling_station_code=EXCLUDED.polling_station_code,
+            registered_voters=EXCLUDED.registered_voters,turnout_reporting_interval_minutes=EXCLUDED.turnout_reporting_interval_minutes
+        """,(s.station_id,ELECTION_ID,s.centre_id,s.code,s.registered,s.turnout_interval_minutes))
     for pid,pname,_,_,_,_ in POSITIONS:
         for n,name in ((1,"Amina Njeri"),(2,"Brian Wanyonyi"),(3,"David Mwangi")):
             cid=f"{pid}-C{n:03d}"
