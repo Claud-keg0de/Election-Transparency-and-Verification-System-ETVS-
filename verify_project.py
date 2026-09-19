@@ -21,7 +21,7 @@ REQUIRED_COLUMNS = {
     "regions": {"region_id", "region_name", "region_type"},
     "special_voting_areas": {
         "special_voting_area_id", "election_id", "area_code", "area_name",
-        "voting_category", "source_document_id", "notes"
+        "voting_category", "country_name", "source_document_id", "notes"
     },
     "county_region_assignments": {"county_id", "region_id"},
     "political_parties": {"party_id", "party_name", "party_abbreviation"},
@@ -195,8 +195,27 @@ def main() -> int:
                     "SELECT COUNT(*) AS n FROM special_voting_areas WHERE election_id=%s",
                     (args.election_id,)
                 ).fetchone()["n"]
-                if special_area_count < 2:
-                    failures.append(f"Expected Diaspora and Prisons special voting areas, found: {special_area_count}")
+                if special_area_count < 13:
+                    failures.append(f"Expected 12 diaspora country areas plus 1 prison area, found: {special_area_count}")
+
+                diaspora_station_stats = cur.execute("""
+                    SELECT COUNT(*) AS station_count,
+                           COALESCE(SUM(registered_voters),0) AS registered_voters
+                    FROM polling_stations ps
+                    JOIN special_voting_areas sva
+                      ON sva.special_voting_area_id = ps.special_voting_area_id
+                    WHERE ps.election_id=%s
+                      AND ps.location_type='SPECIAL'
+                      AND sva.voting_category='DIASPORA'
+                """, (args.election_id,)).fetchone()
+                if diaspora_station_stats["station_count"] != 27:
+                    failures.append(
+                        f"Expected 27 historical diaspora polling stations, found: {diaspora_station_stats['station_count']}"
+                    )
+                if diaspora_station_stats["registered_voters"] != 10443:
+                    failures.append(
+                        f"Expected 10,443 historical diaspora registered voters, found: {diaspora_station_stats['registered_voters']}"
+                    )
 
                 special_location_errors = cur.execute("""
                     SELECT COUNT(*) AS n
