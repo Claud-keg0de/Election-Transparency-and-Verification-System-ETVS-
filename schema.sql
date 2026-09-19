@@ -783,6 +783,12 @@ CREATE TABLE ballot_security_observations (
         ON UPDATE CASCADE
         ON DELETE RESTRICT,
 
+    CONSTRAINT fk_ballot_security_observation_station_election
+        FOREIGN KEY (polling_station_id, election_id)
+        REFERENCES polling_stations(polling_station_id, election_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT,
+
     CONSTRAINT fk_ballot_security_observation_specification
         FOREIGN KEY (ballot_specification_id)
         REFERENCES ballot_specifications(ballot_specification_id)
