@@ -82,6 +82,9 @@ REQUIRED_FKS = {
     "fk_finding_position",
     "fk_ballot_position",
     "fk_ballot_turnout_observation",
+    "fk_ballot_security_observation_station_election",
+    "fk_ballot_security_observation_specification",
+    "fk_ballot_security_observation_batch",
 }
 
 
