@@ -608,6 +608,17 @@ def check(cur)->None:
         LEFT JOIN result_submissions rs ON rs.election_id=ps.election_id AND rs.polling_station_id=ps.polling_station_id
         WHERE ps.election_id=%s GROUP BY ps.polling_station_id,rv.registered_voters,t.voters_turnout ORDER BY ps.polling_station_id
     """,(ELECTION_ID,)).fetchall()
+    interval_rows=cur.execute("""
+        SELECT polling_station_id,turnout_reporting_interval_minutes
+        FROM polling_stations WHERE election_id=%s ORDER BY polling_station_id
+    """,(ELECTION_ID,)).fetchall()
+    expected={s.station_id:s.turnout_interval_minutes for s in STATIONS}
+    actual={r["polling_station_id"]:r["turnout_reporting_interval_minutes"] for r in interval_rows}
+    if actual != expected:
+        raise AssertionError(f"Turnout interval configuration mismatch: expected {expected}, got {actual}")
+    if any(v < 1 or v > 1440 for v in actual.values()):
+        raise AssertionError("Turnout reporting intervals must be between 1 and 1440 minutes.")
+    print("Turnout reporting intervals: PASS")
     print("\nSTATION COVERAGE")
     for r in rows:print(f"{r['polling_station_id']}: registered={r['registered_voters']} turnout={r['voters_turnout']} contests={r['contests']} result_positions={r['result_positions']} accounting={r['min_accounted']}..{r['max_accounted']}")
 
