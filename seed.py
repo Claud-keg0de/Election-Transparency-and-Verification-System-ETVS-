@@ -146,6 +146,11 @@ def ensure_schema(cur) -> None:
             UNIQUE (party_id, symbol_name)
         )
     """)
+    cur.execute("ALTER TABLE polling_stations ADD COLUMN IF NOT EXISTS special_voting_area_id TEXT")
+    cur.execute("ALTER TABLE polling_stations ADD COLUMN IF NOT EXISTS location_type TEXT NOT NULL DEFAULT 'NORMAL'")
+    cur.execute("ALTER TABLE polling_stations ALTER COLUMN registration_centre_id DROP NOT NULL")
+    cur.execute("ALTER TABLE polling_stations ADD CONSTRAINT fk_polling_station_special_area FOREIGN KEY (special_voting_area_id) REFERENCES special_voting_areas(special_voting_area_id) ON UPDATE CASCADE ON DELETE RESTRICT")
+
     cur.execute("ALTER TABLE candidates ADD COLUMN IF NOT EXISTS candidate_type TEXT NOT NULL DEFAULT 'PARTY'")
     cur.execute("ALTER TABLE candidates ADD COLUMN IF NOT EXISTS party_id TEXT")
     # Candidate affiliation constraints are added after the deterministic sample
