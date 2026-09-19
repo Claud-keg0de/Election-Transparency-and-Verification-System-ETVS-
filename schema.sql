@@ -638,6 +638,9 @@ CREATE TABLE ballot_security_features (
         ON UPDATE CASCADE
         ON DELETE RESTRICT,
 
+    CONSTRAINT unique_ballot_security_feature_type
+        UNIQUE (ballot_specification_id, feature_type),
+
     CONSTRAINT ballot_security_feature_type_check
         CHECK (feature_type IN (
             'WATERMARK',
@@ -720,6 +723,9 @@ CREATE TABLE ballot_stock_batches (
     CONSTRAINT ballot_batch_serials_present
         CHECK (length(trim(serial_start)) > 0 AND length(trim(serial_end)) > 0),
 
+    CONSTRAINT unique_ballot_stock_batch
+        UNIQUE (election_id, position_id, polling_station_id, serial_start, serial_end),
+
     CONSTRAINT ballot_batch_status_check
         CHECK (allocation_status IN (
             'ALLOCATED',
@@ -800,6 +806,9 @@ CREATE TABLE ballot_security_observations (
         REFERENCES source_documents(document_id)
         ON UPDATE CASCADE
         ON DELETE RESTRICT,
+
+    CONSTRAINT unique_ballot_security_observation_reference
+        UNIQUE (source_reference),
 
     CONSTRAINT ballot_security_observation_status_check
         CHECK (observed_status IN (
@@ -937,6 +946,8 @@ CREATE TABLE ballot_accounting_observations (
 
     polling_station_id TEXT NOT NULL,
 
+    position_id TEXT,
+
     observation_version INTEGER NOT NULL DEFAULT 1,
 
     valid_votes INTEGER NOT NULL,
@@ -974,6 +985,21 @@ CREATE TABLE ballot_accounting_observations (
         ON UPDATE CASCADE
         ON DELETE RESTRICT,
 
+    CONSTRAINT fk_ballot_position
+        FOREIGN KEY (position_id)
+        REFERENCES positions(position_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT,
+
+    CONSTRAINT fk_ballot_turnout_observation
+        FOREIGN KEY (turnout_observation_id)
+        REFERENCES turnout_observations(turnout_observation_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT,
+
+    CONSTRAINT ballot_position_not_null
+        CHECK (position_id IS NOT NULL),
+
     CONSTRAINT valid_votes_non_negative
         CHECK (valid_votes >= 0),
 
@@ -990,6 +1016,7 @@ CREATE TABLE ballot_accounting_observations (
         UNIQUE (
             election_id,
             polling_station_id,
+            position_id,
             observation_version
         )
 );
