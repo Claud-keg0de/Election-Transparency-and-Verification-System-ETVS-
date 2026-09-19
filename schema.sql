@@ -392,6 +392,71 @@ CREATE TABLE polling_stations (
 
 /*
 ===============================================================================
+7. TURNOUT REPORTING INTERVAL CONFIGURATION
+===============================================================================
+
+Each polling station may define its own expected interval for entering turnout
+observations. Configuration is election-specific and time-versioned so changing
+a station's interval never rewrites historical configuration used by earlier
+observations.
+
+Only one current configuration may exist for a polling station at a time.
+Historical configurations remain available for audit and provenance.
+===============================================================================
+*/
+
+CREATE TABLE turnout_reporting_intervals (
+    turnout_interval_id BIGINT
+        GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+
+    election_id TEXT NOT NULL,
+
+    polling_station_id TEXT NOT NULL,
+
+    interval_minutes INTEGER NOT NULL,
+
+    effective_from TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    effective_to TIMESTAMPTZ,
+
+    reporting_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT fk_turnout_interval_election
+        FOREIGN KEY (election_id)
+        REFERENCES elections(election_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT,
+
+    CONSTRAINT fk_turnout_interval_station_election
+        FOREIGN KEY (polling_station_id, election_id)
+        REFERENCES polling_stations(polling_station_id, election_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT,
+
+    CONSTRAINT turnout_interval_positive
+        CHECK (interval_minutes > 0),
+
+    CONSTRAINT turnout_interval_effective_window
+        CHECK (effective_to IS NULL OR effective_to > effective_from),
+
+    CONSTRAINT unique_turnout_interval_start
+        UNIQUE (election_id, polling_station_id, effective_from)
+);
+
+
+CREATE UNIQUE INDEX uq_turnout_interval_current
+    ON turnout_reporting_intervals(election_id, polling_station_id)
+    WHERE effective_to IS NULL;
+
+
+CREATE INDEX idx_turnout_interval_history
+    ON turnout_reporting_intervals(election_id, polling_station_id, effective_from DESC);
+
+
+/*
+===============================================================================
 7. CANDIDATES
 ===============================================================================
 
@@ -575,6 +640,8 @@ CREATE TABLE turnout_observations (
 
     observation_version INTEGER NOT NULL DEFAULT 1,
 
+    interval_configuration_id BIGINT,
+
     voters_turnout INTEGER NOT NULL,
 
     observed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -603,6 +670,12 @@ CREATE TABLE turnout_observations (
     CONSTRAINT fk_turnout_source_document
         FOREIGN KEY (source_document_id)
         REFERENCES source_documents(document_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT,
+
+    CONSTRAINT fk_turnout_interval_configuration
+        FOREIGN KEY (interval_configuration_id)
+        REFERENCES turnout_reporting_intervals(turnout_interval_id)
         ON UPDATE CASCADE
         ON DELETE RESTRICT,
 
@@ -1164,6 +1237,10 @@ CREATE INDEX idx_turnout_source_document
     ON turnout_observations(source_document_id);
 
 
+CREATE INDEX idx_turnout_interval_configuration
+    ON turnout_observations(interval_configuration_id);
+
+
 CREATE INDEX idx_ballot_election_station
     ON ballot_accounting_observations(
         election_id,
@@ -1244,6 +1321,7 @@ Expected tables:
     counties
     elections
     polling_stations
+    turnout_reporting_intervals
     registration_centres
     result_submissions
     source_documents
