@@ -193,7 +193,35 @@ CREATE TABLE elections (
 
 /*
 ===============================================================================
-2. COUNTIES
+2. KENYA GEOGRAPHIC REGIONS
+===============================================================================
+
+ETVS keeps Kenya's eight traditional regions as a geographic reference layer.
+They are NOT electoral seats and are deliberately kept outside the political
+contest hierarchy (county -> constituency -> ward -> polling station).
+
+A separate mapping table can associate counties with a region for geographic
+reporting without making a region a political seat or contest level.
+===============================================================================
+*/
+
+CREATE TABLE regions (
+    region_id TEXT PRIMARY KEY,
+
+    region_name TEXT NOT NULL UNIQUE,
+
+    region_type TEXT NOT NULL DEFAULT 'FORMER_PROVINCE',
+
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT region_type_check
+        CHECK (region_type IN ('FORMER_PROVINCE', 'REFERENCE_REGION', 'OTHER'))
+);
+
+
+/*
+===============================================================================
+3. COUNTIES
 ===============================================================================
 */
 
@@ -206,9 +234,30 @@ CREATE TABLE counties (
 );
 
 
+CREATE TABLE county_region_assignments (
+    county_id TEXT PRIMARY KEY,
+
+    region_id TEXT NOT NULL,
+
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT fk_county_region_county
+        FOREIGN KEY (county_id)
+        REFERENCES counties(county_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT,
+
+    CONSTRAINT fk_county_region_region
+        FOREIGN KEY (region_id)
+        REFERENCES regions(region_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT
+);
+
+
 /*
 ===============================================================================
-3. CONSTITUENCIES
+4. CONSTITUENCIES
 ===============================================================================
 */
 
@@ -234,7 +283,7 @@ CREATE TABLE constituencies (
 
 /*
 ===============================================================================
-4. WARDS
+5. WARDS
 ===============================================================================
 */
 
@@ -260,7 +309,7 @@ CREATE TABLE wards (
 
 /*
 ===============================================================================
-5. REGISTRATION CENTRES
+6. REGISTRATION CENTRES
 ===============================================================================
 
 A registration centre represents the relatively stable administrative or
@@ -315,7 +364,7 @@ CREATE TABLE registration_centres (
 
 /*
 ===============================================================================
-6. POLLING STATIONS
+7. POLLING STATIONS
 ===============================================================================
 
 A polling station represents the election-specific use/assignment of a
@@ -392,7 +441,7 @@ CREATE TABLE polling_stations (
 
 /*
 ===============================================================================
-7. TURNOUT REPORTING INTERVAL CONFIGURATION
+8. TURNOUT REPORTING INTERVAL CONFIGURATION
 ===============================================================================
 
 Each polling station may define its own expected interval for entering turnout
@@ -457,7 +506,7 @@ CREATE INDEX idx_turnout_interval_history
 
 /*
 ===============================================================================
-7. CANDIDATES
+9. CANDIDATES
 ===============================================================================
 
 Candidates belong to a particular election.
@@ -490,6 +539,50 @@ CREATE TABLE positions (
         CHECK (geography_level IN ('NATIONAL', 'COUNTY', 'CONSTITUENCY', 'WARD'))
 );
 
+CREATE TABLE political_parties (
+    party_id TEXT PRIMARY KEY,
+
+    party_name TEXT NOT NULL UNIQUE,
+
+    party_abbreviation TEXT,
+
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT unique_party_abbreviation UNIQUE (party_abbreviation)
+);
+
+
+CREATE TABLE party_symbols (
+    party_symbol_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+
+    party_id TEXT NOT NULL,
+
+    symbol_name TEXT NOT NULL,
+
+    symbol_uri TEXT,
+
+    approved BOOLEAN NOT NULL DEFAULT TRUE,
+
+    effective_from DATE,
+
+    effective_to DATE,
+
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT fk_party_symbol_party
+        FOREIGN KEY (party_id)
+        REFERENCES political_parties(party_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT,
+
+    CONSTRAINT party_symbol_effective_window
+        CHECK (effective_to IS NULL OR effective_from IS NULL OR effective_to > effective_from),
+
+    CONSTRAINT unique_party_symbol_name
+        UNIQUE (party_id, symbol_name)
+);
+
+
 CREATE TABLE candidates (
     candidate_id TEXT PRIMARY KEY,
 
@@ -500,6 +593,10 @@ CREATE TABLE candidates (
     office TEXT NOT NULL,
 
     position_id TEXT,
+
+    candidate_type TEXT NOT NULL DEFAULT 'PARTY',
+
+    party_id TEXT,
 
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
@@ -515,11 +612,52 @@ CREATE TABLE candidates (
         ON UPDATE CASCADE
         ON DELETE RESTRICT,
 
+    CONSTRAINT fk_candidate_party
+        FOREIGN KEY (party_id)
+        REFERENCES political_parties(party_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT,
+
+    CONSTRAINT candidate_type_check
+        CHECK (candidate_type IN ('PARTY', 'INDEPENDENT')),
+
+    CONSTRAINT candidate_party_affiliation_check
+        CHECK ((candidate_type = 'PARTY' AND party_id IS NOT NULL)
+            OR (candidate_type = 'INDEPENDENT' AND party_id IS NULL)),
+
     CONSTRAINT unique_candidate_per_election
         UNIQUE (election_id, candidate_name, office),
 
     CONSTRAINT unique_candidate_election_pair
         UNIQUE (candidate_id, election_id)
+);
+
+
+CREATE TABLE independent_candidate_symbols (
+    independent_symbol_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+
+    candidate_id TEXT NOT NULL UNIQUE,
+
+    election_id TEXT NOT NULL,
+
+    symbol_name TEXT NOT NULL,
+
+    symbol_uri TEXT,
+
+    approved BOOLEAN NOT NULL DEFAULT TRUE,
+
+    approved_at TIMESTAMPTZ,
+
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT fk_independent_symbol_candidate
+        FOREIGN KEY (candidate_id, election_id)
+        REFERENCES candidates(candidate_id, election_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT,
+
+    CONSTRAINT independent_symbol_candidate_type_check
+        CHECK (candidate_id IS NOT NULL)
 );
 
 
@@ -607,7 +745,7 @@ CREATE INDEX idx_published_aggregate_lookup
 
 /*
 ===============================================================================
-8. TURNOUT OBSERVATIONS
+10. TURNOUT OBSERVATIONS
 ===============================================================================
 
 INDEPENDENT SOURCE OBSERVATION
