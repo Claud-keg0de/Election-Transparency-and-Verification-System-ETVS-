@@ -344,26 +344,105 @@ def reset_sample(cur) -> None:
 
 
 def seed_master_data(cur) -> None:
-    regions=(('REG-01','Nairobi'),('REG-02','Central'),('REG-03','Coast'),('REG-04','Eastern'),('REG-05','North Eastern'),('REG-06','Nyanza'),('REG-07','Rift Valley'),('REG-08','Western'))
-    for rid,name in regions:
-        cur.execute("INSERT INTO regions(region_id,region_name,region_type) VALUES(%s,%s,'FORMER_PROVINCE') ON CONFLICT(region_id) DO UPDATE SET region_name=EXCLUDED.region_name",(rid,name))
-    cur.execute("INSERT INTO elections(election_id,election_name,election_date,status) VALUES(%s,'ETVS Sample Election 2027','2027-08-10','ACTIVE') ON CONFLICT DO NOTHING",(ELECTION_ID,))
-    cur.execute("INSERT INTO counties(county_id,county_name) VALUES('COUNTY001','Sample County') ON CONFLICT DO NOTHING")
-    for cid,name in (("CON001","Greenfield Constituency"),("CON002","Riverdale Constituency")):
-        cur.execute("INSERT INTO constituencies(constituency_id,constituency_name,county_id) VALUES(%s,%s,'COUNTY001') ON CONFLICT DO NOTHING",(cid,name))
-    wards=(("W001","Greenfield Central","CON001"),("W002","Greenfield East","CON001"),("W003","Riverdale Central","CON002"),("W004","Riverdale East","CON002"))
-    for wid,name,cid in wards:cur.execute("INSERT INTO wards(ward_id,ward_name,constituency_id) VALUES(%s,%s,%s) ON CONFLICT DO NOTHING",(wid,name,cid))
-    cur.execute("INSERT INTO county_region_assignments(county_id,region_id) VALUES('COUNTY001','REG-07') ON CONFLICT(county_id) DO UPDATE SET region_id=EXCLUDED.region_id")
-    cur.execute("INSERT INTO political_parties(party_id,party_name,party_abbreviation) VALUES('PTY-ALPHA','Civic Renewal Party','CRP'),('PTY-BETA','National Development Party','NDP') ON CONFLICT(party_id) DO UPDATE SET party_name=EXCLUDED.party_name,party_abbreviation=EXCLUDED.party_abbreviation")
-    cur.execute("INSERT INTO party_symbols(party_id,symbol_name,symbol_uri,approved) VALUES('PTY-ALPHA','Rising Sun','seed://symbols/crp-rising-sun',TRUE),('PTY-BETA','Open Book','seed://symbols/ndp-open-book',TRUE) ON CONFLICT(party_id,symbol_name) DO UPDATE SET symbol_uri=EXCLUDED.symbol_uri,approved=EXCLUDED.approved")
-    centres=(("RC001","Greenfield Primary School","W001"),("RC002","Greenfield Community Hall","W002"),("RC003","Greenfield Secondary School","W001"),("RC004","Riverdale Primary School","W003"),("RC005","Riverdale Community Hall","W004"),("RC006","Riverdale Secondary School","W003"))
-    for rid,name,wid in centres:cur.execute("INSERT INTO registration_centres(registration_centre_id,registration_centre_name,ward_id) VALUES(%s,%s,%s) ON CONFLICT DO NOTHING",(rid,name,wid))
+    # Hard-coded national reference geography for the current ETVS phase.
+    for rid, name in REGIONS.items():
+        cur.execute("""
+            INSERT INTO regions(region_id, region_name, region_type)
+            VALUES(%s,%s,'FORMER_PROVINCE')
+            ON CONFLICT(region_id) DO UPDATE SET region_name=EXCLUDED.region_name
+        """, (rid,name))
+
+    for county_id, county_code, county_name, region_id in COUNTIES:
+        cur.execute("""
+            INSERT INTO counties(county_id,county_name)
+            VALUES(%s,%s)
+            ON CONFLICT(county_id) DO UPDATE SET county_name=EXCLUDED.county_name
+        """, (county_id,county_name))
+        cur.execute("""
+            INSERT INTO county_region_assignments(county_id,region_id)
+            VALUES(%s,%s)
+            ON CONFLICT(county_id) DO UPDATE SET region_id=EXCLUDED.region_id
+        """, (county_id,region_id))
+
+    county_by_code={code:cid for cid,code,_,_ in COUNTIES}
+    for number,name,county_code in CONSTITUENCIES:
+        county_id=county_by_code[county_code]
+        constituency_id=f"KE-C{number:03d}"
+        cur.execute("""
+            INSERT INTO constituencies(constituency_id,constituency_name,county_id)
+            VALUES(%s,%s,%s)
+            ON CONFLICT(constituency_id) DO UPDATE SET constituency_name=EXCLUDED.constituency_name,
+                county_id=EXCLUDED.county_id
+        """, (constituency_id,name,county_id))
+
+    cur.execute("""
+        INSERT INTO elections(election_id,election_name,election_date,status)
+        VALUES(%s,'ETVS Sample Election 2027','2027-08-10','ACTIVE')
+        ON CONFLICT DO NOTHING
+    """, (ELECTION_ID,))
+
+    # Controlled test wards use real Trans Nzoia constituencies.
+    wards=(
+        ("W001","Keiyo","KE-C136"),
+        ("W002","Bidii","KE-C136"),
+        ("W003","Endebess","KE-C137"),
+        ("W004","Matumbei","KE-C137"),
+    )
+    for wid,name,cid in wards:
+        cur.execute("""
+            INSERT INTO wards(ward_id,ward_name,constituency_id)
+            VALUES(%s,%s,%s)
+            ON CONFLICT(ward_id) DO UPDATE SET ward_name=EXCLUDED.ward_name,
+                constituency_id=EXCLUDED.constituency_id
+        """, (wid,name,cid))
+
+    cur.execute("""
+        INSERT INTO political_parties(party_id,party_name,party_abbreviation)
+        VALUES('PTY-ALPHA','Civic Renewal Party','CRP'),
+              ('PTY-BETA','National Development Party','NDP')
+        ON CONFLICT(party_id) DO UPDATE SET party_name=EXCLUDED.party_name,
+            party_abbreviation=EXCLUDED.party_abbreviation
+    """)
+    cur.execute("""
+        INSERT INTO party_symbols(party_id,symbol_name,symbol_uri,approved)
+        VALUES('PTY-ALPHA','Rising Sun','seed://symbols/crp-rising-sun',TRUE),
+              ('PTY-BETA','Open Book','seed://symbols/ndp-open-book',TRUE)
+        ON CONFLICT(party_id,symbol_name) DO UPDATE SET symbol_uri=EXCLUDED.symbol_uri,
+            approved=EXCLUDED.approved
+    """)
+
+    centres=(
+        ("RC001","Greenfield Primary School","W001"),
+        ("RC002","Greenfield Community Hall","W002"),
+        ("RC003","Greenfield Secondary School","W001"),
+        ("RC004","Riverdale Primary School","W003"),
+        ("RC005","Riverdale Community Hall","W004"),
+        ("RC006","Riverdale Secondary School","W003"),
+    )
+    for rid,name,wid in centres:
+        cur.execute("""
+            INSERT INTO registration_centres(registration_centre_id,registration_centre_name,ward_id)
+            VALUES(%s,%s,%s)
+            ON CONFLICT(registration_centre_id) DO UPDATE SET registration_centre_name=EXCLUDED.registration_centre_name,
+                ward_id=EXCLUDED.ward_id
+        """, (rid,name,wid))
+
     for s in STATIONS:
         cur.execute("""
-            INSERT INTO polling_stations(polling_station_id,election_id,registration_centre_id,polling_station_code,registered_voters)
-            VALUES(%s,%s,%s,%s,%s) ON CONFLICT(polling_station_id) DO UPDATE SET election_id=EXCLUDED.election_id,
-            registration_centre_id=EXCLUDED.registration_centre_id,polling_station_code=EXCLUDED.polling_station_code,registered_voters=EXCLUDED.registered_voters
-        """,(s.station_id,ELECTION_ID,s.centre_id,s.code,s.registered))
+            INSERT INTO polling_stations(
+                polling_station_id,election_id,registration_centre_id,special_voting_area_id,
+                location_type,polling_station_code,registered_voters
+            )
+            VALUES(%s,%s,%s,NULL,'NORMAL',%s,%s)
+            ON CONFLICT(polling_station_id) DO UPDATE SET
+                election_id=EXCLUDED.election_id,
+                registration_centre_id=EXCLUDED.registration_centre_id,
+                special_voting_area_id=NULL,
+                location_type='NORMAL',
+                polling_station_code=EXCLUDED.polling_station_code,
+                registered_voters=EXCLUDED.registered_voters
+        """, (s.station_id,ELECTION_ID,s.centre_id,s.code,s.registered))
+
     for pid,pname,_,_,_,_ in POSITIONS:
         for n,name in ((1,"Amina Njeri"),(2,"Brian Wanyonyi"),(3,"David Mwangi")):
             cid=f"{pid}-C{n:03d}"
@@ -372,16 +451,23 @@ def seed_master_data(cur) -> None:
             cur.execute("""
                 INSERT INTO candidates(candidate_id,election_id,candidate_name,office,position_id,candidate_type,party_id)
                 VALUES(%s,%s,%s,%s,%s,%s,%s)
-                ON CONFLICT(candidate_id) DO UPDATE SET candidate_name=EXCLUDED.candidate_name,office=EXCLUDED.office,
-                    position_id=EXCLUDED.position_id,candidate_type=EXCLUDED.candidate_type,party_id=EXCLUDED.party_id
-            """,(cid,ELECTION_ID,name,pname,pid,candidate_type,party_id))
+                ON CONFLICT(candidate_id) DO UPDATE SET candidate_name=EXCLUDED.candidate_name,
+                    office=EXCLUDED.office,position_id=EXCLUDED.position_id,
+                    candidate_type=EXCLUDED.candidate_type,party_id=EXCLUDED.party_id
+            """, (cid,ELECTION_ID,name,pname,pid,candidate_type,party_id))
             if candidate_type=='INDEPENDENT':
                 cur.execute("""
-                    INSERT INTO independent_candidate_symbols(candidate_id,election_id,symbol_name,symbol_uri,approved,approved_at)
+                    INSERT INTO independent_candidate_symbols(
+                        candidate_id,election_id,symbol_name,symbol_uri,approved,approved_at
+                    )
                     VALUES(%s,%s,%s,%s,TRUE,%s)
-                    ON CONFLICT(candidate_id) DO UPDATE SET election_id=EXCLUDED.election_id,symbol_name=EXCLUDED.symbol_name,
-                        symbol_uri=EXCLUDED.symbol_uri,approved=EXCLUDED.approved,approved_at=EXCLUDED.approved_at
-                """,(cid,ELECTION_ID,f"Independent symbol for {name}",f"seed://symbols/{cid.lower()}",datetime(2027,7,1).date()))
+                    ON CONFLICT(candidate_id) DO UPDATE SET
+                        election_id=EXCLUDED.election_id,symbol_name=EXCLUDED.symbol_name,
+                        symbol_uri=EXCLUDED.symbol_uri,approved=EXCLUDED.approved,
+                        approved_at=EXCLUDED.approved_at
+                """, (cid,ELECTION_ID,f"Independent symbol for {name}",
+                      f"seed://symbols/{cid.lower()}",datetime(2027,7,1).date()))
+
     cur.execute("""
         DO $ BEGIN
             IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='fk_candidate_party') THEN
@@ -401,6 +487,27 @@ def seed_master_data(cur) -> None:
         END $;
     """)
 
+
+def seed_special_voting_areas(cur, source_document_id:int) -> None:
+    # Historical 2022 IEBC reference facts. They are not treated as political seats.
+    areas=(
+        ("SVA-DIASPORA","291","Diaspora","DIASPORA",
+         "2022 IEBC Gazette: 10,443 registered diaspora voters across 12 countries and 26 polling stations."),
+        ("SVA-PRISONS","01451","Prisons","PRISON",
+         "2022 IEBC Gazette: 7,483 registered prison voters across 103 polling stations."),
+    )
+    for aid,code,name,category,notes in areas:
+        cur.execute("""
+            INSERT INTO special_voting_areas(
+                special_voting_area_id,election_id,area_code,area_name,
+                voting_category,source_document_id,notes
+            )
+            VALUES(%s,%s,%s,%s,%s,%s,%s)
+            ON CONFLICT(special_voting_area_id) DO UPDATE SET
+                area_code=EXCLUDED.area_code,area_name=EXCLUDED.area_name,
+                voting_category=EXCLUDED.voting_category,
+                source_document_id=EXCLUDED.source_document_id,notes=EXCLUDED.notes
+        """, (aid,ELECTION_ID,code,name,category,source_document_id,notes))
 
 def seed_turnout_intervals(cur) -> None:
     """Seed one independently configurable reporting interval for every station."""
