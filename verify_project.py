@@ -201,15 +201,33 @@ def main() -> int:
                     SELECT COUNT(*)::INTEGER n
                     FROM ballot_stock_batches b
                     WHERE b.election_id=%s
-                      AND (b.quantity <= 0 OR b.serial_start !~ '^[0-9]+
-                    """
+                      AND (
+                          b.quantity <= 0
+                          OR b.serial_start !~ '^[0-9]+$'
+                          OR b.serial_end !~ '^[0-9]+$'
+                          OR b.quantity <> (b.serial_end::BIGINT - b.serial_start::BIGINT + 1)
+                      )
+                """,(args.election_id,)).fetchone()["n"]
+                if incomplete_batches:
+                    failures.append(f"Invalid ballot stock ranges: {incomplete_batches}")
+
+                security_orphans = cur.execute("""
+                    SELECT COUNT(*)::INTEGER n
+                    FROM ballot_security_observations o
+                    LEFT JOIN ballot_specifications s ON s.ballot_specification_id=o.ballot_specification_id
+                    LEFT JOIN ballot_stock_batches b ON b.ballot_batch_id=o.ballot_batch_id
+                    WHERE o.election_id=%s
+                      AND (s.election_id IS DISTINCT FROM o.election_id OR b.ballot_batch_id IS NULL)
+                """,(args.election_id,)).fetchone()["n"]
+                if security_orphans:
+                    failures.append(f"Ballot security orphan observations: {security_orphans}")
+
+                invalid_hash = cur.execute("""
                     SELECT COUNT(*) AS n
                     FROM result_submissions
                     WHERE election_id = %s
                       AND submission_hash IS NULL
-                    """,
-                    (args.election_id,),
-                ).fetchone()["n"]
+                """,(args.election_id,)).fetchone()["n"]
                 if invalid_hash:
                     failures.append(f"Result submissions without hashes: {invalid_hash}")
 
