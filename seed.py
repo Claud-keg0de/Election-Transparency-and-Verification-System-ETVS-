@@ -315,20 +315,23 @@ def reset_sample(cur) -> None:
     clears the complete derived audit history before rebuilding the sample.
     This function is intended for the controlled development/test database.
     """
-    for sql in (
+    # The first six deletes clear the global derived audit chain and have no
+    # SQL parameters. All remaining deletes are scoped to the controlled sample.
+    global_deletes = (
         "DELETE FROM source_comparisons",
         "DELETE FROM audit_position_results",
         "DELETE FROM audit_passed_results",
         "DELETE FROM audit_failed_results",
         "DELETE FROM audit_findings",
         "DELETE FROM audit_runs",
+    )
+    for sql in global_deletes:
+        try: cur.execute(sql)
+        except psycopg.errors.UndefinedTable: pass
+
+    scoped_deletes = (
         "DELETE FROM submission_validation_results WHERE source_submission_id IN (SELECT source_submission_id FROM source_submissions WHERE election_id=%s)",
         "DELETE FROM source_submissions WHERE election_id=%s",
-        "DELETE FROM audit_position_results WHERE election_id=%s",
-        "DELETE FROM audit_passed_results WHERE election_id=%s",
-        "DELETE FROM audit_failed_results WHERE election_id=%s",
-        "DELETE FROM audit_findings WHERE election_id=%s",
-        "DELETE FROM audit_runs WHERE election_id=%s",
         "DELETE FROM result_submissions WHERE election_id=%s",
         "DELETE FROM published_aggregate_totals WHERE election_id=%s",
         "DELETE FROM ballot_security_observations WHERE election_id=%s",
@@ -341,7 +344,8 @@ def reset_sample(cur) -> None:
         "DELETE FROM polling_stations WHERE election_id=%s",
         "DELETE FROM candidates WHERE election_id=%s",
         "DELETE FROM elections WHERE election_id=%s",
-    ):
+    )
+    for sql in scoped_deletes:
         try: cur.execute(sql,(ELECTION_ID,))
         except psycopg.errors.UndefinedTable: pass
     for table,column,values in (("registration_centres","registration_centre_id",["RC001","RC002","RC003","RC004","RC005","RC006"]),("wards","ward_id",["W001","W002","W003","W004"]),("constituencies","constituency_id",["CON001","CON002"]),("counties","county_id",["COUNTY001"])):
