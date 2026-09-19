@@ -486,7 +486,10 @@ CREATE TABLE special_voting_slots (
         UNIQUE (election_id, slot_code),
 
     CONSTRAINT unique_special_slot_number
-        UNIQUE (election_id, special_voting_area_id, slot_number)
+        UNIQUE (election_id, special_voting_area_id, slot_number),
+
+    CONSTRAINT unique_special_slot_area_pair
+        UNIQUE (special_voting_slot_id, special_voting_area_id)
 );
 
 CREATE INDEX idx_special_voting_slots_area
@@ -623,6 +626,12 @@ CREATE TABLE polling_stations (
         ON UPDATE CASCADE
         ON DELETE RESTRICT,
 
+    CONSTRAINT fk_polling_station_special_slot_area
+        FOREIGN KEY (special_voting_slot_id, special_voting_area_id)
+        REFERENCES special_voting_slots(special_voting_slot_id, special_voting_area_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT,
+
     CONSTRAINT polling_station_location_type_check
         CHECK (location_type IN ('NORMAL','SPECIAL')),
 
@@ -630,7 +639,9 @@ CREATE TABLE polling_stations (
         CHECK (
             (location_type = 'NORMAL' AND registration_centre_id IS NOT NULL AND special_voting_area_id IS NULL)
             OR
-            (location_type = 'SPECIAL' AND registration_centre_id IS NULL AND special_voting_area_id IS NOT NULL)
+            (location_type = 'SPECIAL' AND registration_centre_id IS NULL
+             AND special_voting_area_id IS NOT NULL
+             AND special_voting_slot_id IS NOT NULL)
         ),
 
     CONSTRAINT polling_station_registered_voters_non_negative
@@ -1598,148 +1609,3 @@ CREATE TABLE audit_position_results (
 
 CREATE INDEX idx_audit_failed_station ON audit_failed_results(election_id, polling_station_id);
 CREATE INDEX idx_audit_failed_geography ON audit_failed_results(election_id, geography_level, geography_id);
-CREATE INDEX idx_source_comparisons_run ON source_comparisons(audit_run_id);
-CREATE INDEX idx_audit_findings_candidate ON audit_findings(election_id, candidate_id);
-CREATE INDEX idx_audit_findings_geography ON audit_findings(election_id, geography_level, geography_id);
-
-
-/*
-===============================================================================
-13. INDEXES
-===============================================================================
-
-Indexes improve lookup and audit-engine performance.
-
-They do not modify source data.
-
-===============================================================================
-*/
-
-CREATE INDEX idx_constituencies_county
-    ON constituencies(county_id);
-
-
-CREATE INDEX idx_wards_constituency
-    ON wards(constituency_id);
-
-
-CREATE INDEX idx_registration_centres_ward
-    ON registration_centres(ward_id);
-
-
-CREATE INDEX idx_polling_stations_election
-    ON polling_stations(election_id);
-
-
-CREATE INDEX idx_polling_stations_registration_centre
-    ON polling_stations(registration_centre_id);
-
-CREATE INDEX idx_polling_stations_special_area
-    ON polling_stations(special_voting_area_id);
-
-CREATE INDEX idx_polling_stations_special_slot
-    ON polling_stations(special_voting_slot_id);
-
-
-CREATE INDEX idx_polling_stations_election_centre
-    ON polling_stations(election_id, registration_centre_id);
-
-
-CREATE INDEX idx_turnout_election_station
-    ON turnout_observations(
-        election_id,
-        polling_station_id
-    );
-
-
-CREATE INDEX idx_turnout_source_document
-    ON turnout_observations(source_document_id);
-
-
-CREATE INDEX idx_turnout_interval_configuration
-    ON turnout_observations(interval_configuration_id);
-
-
-CREATE INDEX idx_ballot_election_station
-    ON ballot_accounting_observations(
-        election_id,
-        polling_station_id
-    );
-
-
-CREATE INDEX idx_ballot_source_document
-    ON ballot_accounting_observations(source_document_id);
-
-
-CREATE INDEX idx_results_election_station
-    ON result_submissions(
-        election_id,
-        polling_station_id
-    );
-
-
-CREATE INDEX idx_results_candidate
-    ON result_submissions(candidate_id);
-
-
-CREATE INDEX idx_results_position
-    ON result_submissions(position_id);
-
-
-CREATE INDEX idx_results_source_document
-    ON result_submissions(source_document_id);
-
-
-CREATE INDEX idx_results_submission_hash
-    ON result_submissions(submission_hash);
-
-
-CREATE INDEX idx_audit_runs_election
-    ON audit_runs(election_id);
-
-
-CREATE INDEX idx_audit_findings_run
-    ON audit_findings(audit_run_id);
-
-
-CREATE INDEX idx_audit_findings_election
-    ON audit_findings(election_id);
-
-
-CREATE INDEX idx_audit_findings_station
-    ON audit_findings(
-        election_id,
-        polling_station_id
-    );
-
-
-/*
-===============================================================================
-14. FINAL SCHEMA VERIFICATION
-===============================================================================
-
-After successfully executing this schema, run:
-
-    SELECT table_name
-    FROM information_schema.tables
-    WHERE table_schema = 'public'
-      AND table_type = 'BASE TABLE'
-    ORDER BY table_name;
-
-Expected tables:
-
-    audit_findings
-    audit_failed_results
-    audit_passed_results
-    audit_position_results
-    audit_runs
-    ballot_accounting_observations
-    candidates
-    positions
-    constituencies
-    counties
-    elections
-    polling_stations
-    turnout_reporting_intervals
-    registration_centres
-    result_submissions
