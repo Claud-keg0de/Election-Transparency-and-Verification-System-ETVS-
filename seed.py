@@ -132,10 +132,8 @@ def ensure_schema(cur) -> None:
     """)
     cur.execute("ALTER TABLE candidates ADD COLUMN IF NOT EXISTS candidate_type TEXT NOT NULL DEFAULT 'PARTY'")
     cur.execute("ALTER TABLE candidates ADD COLUMN IF NOT EXISTS party_id TEXT")
-    cur.execute("ALTER TABLE candidates DROP CONSTRAINT IF EXISTS candidate_type_check")
-    cur.execute("ALTER TABLE candidates DROP CONSTRAINT IF EXISTS candidate_party_affiliation_check")
-    cur.execute("ALTER TABLE candidates ADD CONSTRAINT candidate_type_check CHECK (candidate_type IN ('PARTY','INDEPENDENT'))")
-    cur.execute("ALTER TABLE candidates ADD CONSTRAINT candidate_party_affiliation_check CHECK ((candidate_type='PARTY' AND party_id IS NOT NULL) OR (candidate_type='INDEPENDENT' AND party_id IS NULL))")
+    # Candidate affiliation constraints are added after the deterministic sample
+    # candidates have been refreshed below, so legacy rows are not stranded.
     cur.execute("""
         CREATE TABLE IF NOT EXISTS independent_candidate_symbols (
             independent_symbol_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -150,6 +148,17 @@ def ensure_schema(cur) -> None:
         )
     """)
     cur.execute("CREATE INDEX IF NOT EXISTS idx_independent_symbols_candidate ON independent_candidate_symbols(candidate_id,election_id)")
+    cur.execute("""
+        DO $ BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='fk_independent_symbol_candidate') THEN
+                ALTER TABLE independent_candidate_symbols
+                ADD CONSTRAINT fk_independent_symbol_candidate
+                FOREIGN KEY (candidate_id, election_id)
+                REFERENCES candidates(candidate_id, election_id)
+                ON UPDATE CASCADE ON DELETE RESTRICT;
+            END IF;
+        END $;
+    """)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS registered_voter_observations (
             registered_voter_observation_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -352,6 +361,24 @@ def seed_master_data(cur) -> None:
                     ON CONFLICT(candidate_id) DO UPDATE SET election_id=EXCLUDED.election_id,symbol_name=EXCLUDED.symbol_name,
                         symbol_uri=EXCLUDED.symbol_uri,approved=EXCLUDED.approved,approved_at=EXCLUDED.approved_at
                 """,(cid,ELECTION_ID,f"Independent symbol for {name}",f"seed://symbols/{cid.lower()}",datetime(2027,7,1).date()))
+    cur.execute("""
+        DO $ BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='fk_candidate_party') THEN
+                ALTER TABLE candidates ADD CONSTRAINT fk_candidate_party
+                FOREIGN KEY (party_id) REFERENCES political_parties(party_id)
+                ON UPDATE CASCADE ON DELETE RESTRICT;
+            END IF;
+            IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='candidate_type_check') THEN
+                ALTER TABLE candidates ADD CONSTRAINT candidate_type_check
+                CHECK (candidate_type IN ('PARTY','INDEPENDENT'));
+            END IF;
+            IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='candidate_party_affiliation_check') THEN
+                ALTER TABLE candidates ADD CONSTRAINT candidate_party_affiliation_check
+                CHECK ((candidate_type='PARTY' AND party_id IS NOT NULL)
+                    OR (candidate_type='INDEPENDENT' AND party_id IS NULL));
+            END IF;
+        END $;
+    """)
 
 
 def seed_turnout_intervals(cur) -> None:
