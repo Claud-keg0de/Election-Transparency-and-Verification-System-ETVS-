@@ -74,15 +74,16 @@ class StationSeed:
     centre_id: str
     registered: int
     turnout: int
+    turnout_interval_minutes: int
 
 
 STATIONS = (
-    StationSeed("PS001", "PS-001", "RC001", 1000, 700),
-    StationSeed("PS002", "PS-002", "RC002", 800, 500),
-    StationSeed("PS003", "PS-003", "RC003", 950, 1000),  # R001 anomaly
-    StationSeed("PS004", "PS-004", "RC004", 1200, 900),
-    StationSeed("PS005", "PS-005", "RC005", 600, 450),
-    StationSeed("PS006", "PS-006", "RC006", 700, 650),
+    StationSeed("PS001", "PS-001", "RC001", 1000, 700, 60),
+    StationSeed("PS002", "PS-002", "RC002", 800, 500, 30),
+    StationSeed("PS003", "PS-003", "RC003", 950, 1000, 120),  # R001 anomaly
+    StationSeed("PS004", "PS-004", "RC004", 1200, 900, 45),
+    StationSeed("PS005", "PS-005", "RC005", 600, 450, 240),
+    StationSeed("PS006", "PS-006", "RC006", 700, 650, 180),
 )
 
 # Each tuple is (valid, rejected, spoilt) for every contest at that station.
@@ -149,8 +150,20 @@ def ensure_schema(cur) -> None:
     cur.execute("ALTER TABLE result_submissions ADD COLUMN IF NOT EXISTS observed_at TIMESTAMPTZ")
     cur.execute("ALTER TABLE positions ADD COLUMN IF NOT EXISTS ballot_code TEXT")
     cur.execute("ALTER TABLE positions ADD COLUMN IF NOT EXISTS observation_sequence INTEGER")
+    cur.execute("ALTER TABLE polling_stations ADD COLUMN IF NOT EXISTS turnout_reporting_interval_minutes INTEGER NOT NULL DEFAULT 30")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_registered_latest ON registered_voter_observations(election_id,polling_station_id,observation_version DESC)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_ballot_latest_position ON ballot_accounting_observations(election_id,polling_station_id,position_id,observation_version DESC)")
+    required_fks = (
+        ("fk_ballot_position", "ALTER TABLE ballot_accounting_observations ADD CONSTRAINT fk_ballot_position FOREIGN KEY (position_id) REFERENCES positions(position_id) ON UPDATE CASCADE ON DELETE RESTRICT"),
+        ("fk_ballot_turnout_observation", "ALTER TABLE ballot_accounting_observations ADD CONSTRAINT fk_ballot_turnout_observation FOREIGN KEY (turnout_observation_id) REFERENCES turnout_observations(turnout_observation_id) ON UPDATE CASCADE ON DELETE RESTRICT"),
+        ("fk_ballot_security_observation_station_election", "ALTER TABLE ballot_security_observations ADD CONSTRAINT fk_ballot_security_observation_station_election FOREIGN KEY (polling_station_id,election_id) REFERENCES polling_stations(polling_station_id,election_id) ON UPDATE CASCADE ON DELETE RESTRICT"),
+        ("fk_ballot_security_observation_specification", "ALTER TABLE ballot_security_observations ADD CONSTRAINT fk_ballot_security_observation_specification FOREIGN KEY (ballot_specification_id) REFERENCES ballot_specifications(ballot_specification_id) ON UPDATE CASCADE ON DELETE RESTRICT"),
+        ("fk_ballot_security_observation_batch", "ALTER TABLE ballot_security_observations ADD CONSTRAINT fk_ballot_security_observation_batch FOREIGN KEY (ballot_batch_id) REFERENCES ballot_stock_batches(ballot_batch_id) ON UPDATE CASCADE ON DELETE RESTRICT"),
+    )
+    for constraint_name, statement in required_fks:
+        if not cur.execute("""SELECT 1 FROM information_schema.table_constraints WHERE table_schema='public' AND constraint_name=%s""", (constraint_name,)).fetchone():
+            cur.execute(statement)
+
     cur.execute("""
         CREATE TABLE IF NOT EXISTS sources (
             source_id TEXT PRIMARY KEY, source_name TEXT NOT NULL, source_type TEXT NOT NULL,
@@ -365,10 +378,11 @@ def seed_master_data(cur) -> None:
     for rid,name,wid in centres:cur.execute("INSERT INTO registration_centres(registration_centre_id,registration_centre_name,ward_id) VALUES(%s,%s,%s) ON CONFLICT DO NOTHING",(rid,name,wid))
     for s in STATIONS:
         cur.execute("""
-            INSERT INTO polling_stations(polling_station_id,election_id,registration_centre_id,polling_station_code,registered_voters)
-            VALUES(%s,%s,%s,%s,%s) ON CONFLICT(polling_station_id) DO UPDATE SET election_id=EXCLUDED.election_id,
-            registration_centre_id=EXCLUDED.registration_centre_id,polling_station_code=EXCLUDED.polling_station_code,registered_voters=EXCLUDED.registered_voters
-        """,(s.station_id,ELECTION_ID,s.centre_id,s.code,s.registered))
+            INSERT INTO polling_stations(polling_station_id,election_id,registration_centre_id,polling_station_code,registered_voters,turnout_reporting_interval_minutes)
+            VALUES(%s,%s,%s,%s,%s,%s) ON CONFLICT(polling_station_id) DO UPDATE SET election_id=EXCLUDED.election_id,
+            registration_centre_id=EXCLUDED.registration_centre_id,polling_station_code=EXCLUDED.polling_station_code,registered_voters=EXCLUDED.registered_voters,
+            turnout_reporting_interval_minutes=EXCLUDED.turnout_reporting_interval_minutes
+        """,(s.station_id,ELECTION_ID,s.centre_id,s.code,s.registered,s.turnout_interval_minutes))
     for pid,pname,_,_,_,_ in POSITIONS:
         for n,name in ((1,"Amina Njeri"),(2,"Brian Wanyonyi"),(3,"David Mwangi")):
             cid=f"{pid}-C{n:03d}"
