@@ -18,8 +18,13 @@ from psycopg.rows import dict_row
 ELECTION_ID = "KE-PRES-2027"
 
 REQUIRED_COLUMNS = {
+    "regions": {"region_id", "region_name", "region_type"},
+    "county_region_assignments": {"county_id", "region_id"},
+    "political_parties": {"party_id", "party_name", "party_abbreviation"},
+    "party_symbols": {"party_symbol_id", "party_id", "symbol_name", "symbol_uri", "approved"},
+    "independent_candidate_symbols": {"independent_symbol_id", "candidate_id", "election_id", "symbol_name", "symbol_uri", "approved"},
     "positions": {"position_id", "position_name", "election_level", "geography_level"},
-    "candidates": {"candidate_id", "election_id", "candidate_name", "office", "position_id"},
+    "candidates": {"candidate_id", "election_id", "candidate_name", "office", "position_id", "candidate_type", "party_id"},
     "result_submissions": {
         "result_submission_id", "election_id", "polling_station_id",
         "candidate_id", "result_version", "votes", "position_id",
@@ -60,6 +65,7 @@ REQUIRED_COLUMNS = {
 
 REQUIRED_FKS = {
     "fk_candidate_position",
+    "fk_candidate_party",
     "fk_result_position",
     "fk_published_aggregate_position",
     "fk_audit_run_position",
@@ -142,6 +148,10 @@ def main() -> int:
                 print(f"Election: {args.election_id}")
 
                 checks = [
+                    ("regions", "SELECT COUNT(*) AS n FROM regions"),
+                    ("political_parties", "SELECT COUNT(*) AS n FROM political_parties"),
+                    ("party_symbols", "SELECT COUNT(*) AS n FROM party_symbols"),
+                    ("independent_candidate_symbols", "SELECT COUNT(*) AS n FROM independent_candidate_symbols WHERE election_id = %s"),
                     ("positions", "SELECT COUNT(*) AS n FROM positions"),
                     ("candidates", "SELECT COUNT(*) AS n FROM candidates WHERE election_id = %s"),
                     ("polling_stations", "SELECT COUNT(*) AS n FROM polling_stations WHERE election_id = %s"),
@@ -154,6 +164,39 @@ def main() -> int:
                 for label, sql in checks:
                     row = cur.execute(sql, (args.election_id,) if "%s" in sql else ()).fetchone()
                     print(f"{label:35} {row['n']}")
+
+                region_count = cur.execute("SELECT COUNT(*) AS n FROM regions").fetchone()["n"]
+                if region_count != 8:
+                    failures.append(f"Expected 8 Kenya geographic regions, found: {region_count}")
+
+                regionless_counties = cur.execute("""
+                    SELECT COUNT(*) AS n FROM counties c
+                    LEFT JOIN county_region_assignments cra ON cra.county_id=c.county_id
+                    WHERE cra.county_id IS NULL
+                """).fetchone()["n"]
+                if regionless_counties:
+                    failures.append(f"Counties without a geographic region classification: {regionless_counties}")
+
+                affiliation_errors = cur.execute("""
+                    SELECT COUNT(*) AS n
+                    FROM candidates c
+                    WHERE c.election_id=%s
+                      AND ((c.candidate_type='PARTY' AND c.party_id IS NULL)
+                        OR (c.candidate_type='INDEPENDENT' AND c.party_id IS NOT NULL)
+                        OR c.candidate_type NOT IN ('PARTY','INDEPENDENT'))
+                """,(args.election_id,)).fetchone()["n"]
+                if affiliation_errors:
+                    failures.append(f"Candidate affiliation errors: {affiliation_errors}")
+
+                missing_independent_symbols = cur.execute("""
+                    SELECT COUNT(*) AS n
+                    FROM candidates c
+                    LEFT JOIN independent_candidate_symbols s
+                      ON s.candidate_id=c.candidate_id AND s.election_id=c.election_id
+                    WHERE c.election_id=%s AND c.candidate_type='INDEPENDENT' AND s.independent_symbol_id IS NULL
+                """,(args.election_id,)).fetchone()["n"]
+                if missing_independent_symbols:
+                    failures.append(f"Independent candidates without approved symbol records: {missing_independent_symbols}")
 
                 missing_interval = cur.execute(
                     """
@@ -236,6 +279,8 @@ def main() -> int:
 
                 print("SCHEMA CONTRACT: PASS")
                 print("POSITION RELATIONSHIPS: PASS")
+                print("CANDIDATE PARTY/INDEPENDENT SYMBOL MODEL: PASS")
+                print("KENYA 8-REGION REFERENCE LAYER: PASS")
                 print("TURNOUT INTERVAL CONFIGURATION: PASS")
                 print("TURNOUT OBSERVATION/INTERVAL ALIGNMENT: PASS")
                 print("RESULT/CANDIDATE POSITION ALIGNMENT: PASS")
