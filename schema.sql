@@ -407,6 +407,142 @@ CREATE INDEX idx_special_voting_areas_election
 
 /*
 ===============================================================================
+7B. SPECIAL VOTING AREA SLOTS AND HISTORICAL REFERENCE STATIONS
+===============================================================================
+
+SPECIAL VOTING SLOTS
+--------------------
+Special voting locations are election-specific and may increase, decrease,
+move, or be retired between elections. ETVS therefore does not hard-code the
+number of active diaspora or prison polling stations into the election model.
+
+A slot is a configurable place-holder for an election-specific special polling
+station. Slots can be added or retired without changing the schema.
+
+HISTORICAL REFERENCE STATIONS
+-----------------------------
+Historical IEBC station records are kept separately as source/reference data.
+They are never automatically treated as the active configuration for a future
+election.
+===============================================================================
+*/
+
+CREATE TABLE special_voting_slots (
+    special_voting_slot_id BIGINT
+        GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+
+    election_id TEXT NOT NULL,
+
+    special_voting_area_id TEXT NOT NULL,
+
+    slot_code TEXT NOT NULL,
+
+    slot_number INTEGER NOT NULL,
+
+    slot_status TEXT NOT NULL DEFAULT 'PLANNED',
+
+    location_label TEXT,
+
+    country_name TEXT,
+
+    official_polling_station_code TEXT,
+
+    registered_voters INTEGER,
+
+    source_document_id BIGINT,
+
+    notes TEXT,
+
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT fk_special_slot_election
+        FOREIGN KEY (election_id)
+        REFERENCES elections(election_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT,
+
+    CONSTRAINT fk_special_slot_area
+        FOREIGN KEY (special_voting_area_id)
+        REFERENCES special_voting_areas(special_voting_area_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT,
+
+    CONSTRAINT fk_special_slot_source
+        FOREIGN KEY (source_document_id)
+        REFERENCES source_documents(document_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT,
+
+    CONSTRAINT special_slot_status_check
+        CHECK (slot_status IN ('PLANNED','ACTIVE','SUSPENDED','RETIRED')),
+
+    CONSTRAINT special_slot_number_positive
+        CHECK (slot_number > 0),
+
+    CONSTRAINT special_slot_registered_non_negative
+        CHECK (registered_voters IS NULL OR registered_voters >= 0),
+
+    CONSTRAINT unique_special_slot_code
+        UNIQUE (election_id, slot_code),
+
+    CONSTRAINT unique_special_slot_number
+        UNIQUE (election_id, special_voting_area_id, slot_number)
+);
+
+CREATE INDEX idx_special_voting_slots_area
+    ON special_voting_slots(election_id, special_voting_area_id, slot_status);
+
+
+CREATE TABLE special_voting_area_reference_stations (
+    reference_station_id BIGINT
+        GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+
+    special_voting_area_id TEXT NOT NULL,
+
+    reference_year INTEGER NOT NULL,
+
+    registration_centre_code TEXT,
+
+    polling_station_code TEXT NOT NULL,
+
+    polling_station_name TEXT,
+
+    registered_voters INTEGER,
+
+    source_document_id BIGINT,
+
+    notes TEXT,
+
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT fk_special_reference_area
+        FOREIGN KEY (special_voting_area_id)
+        REFERENCES special_voting_areas(special_voting_area_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT,
+
+    CONSTRAINT fk_special_reference_source
+        FOREIGN KEY (source_document_id)
+        REFERENCES source_documents(document_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT,
+
+    CONSTRAINT special_reference_year_check
+        CHECK (reference_year >= 2012),
+
+    CONSTRAINT special_reference_voters_non_negative
+        CHECK (registered_voters IS NULL OR registered_voters >= 0),
+
+    CONSTRAINT unique_special_reference_station
+        UNIQUE (special_voting_area_id, reference_year, polling_station_code)
+);
+
+CREATE INDEX idx_special_reference_station_area
+    ON special_voting_area_reference_stations(special_voting_area_id, reference_year);
+
+
+/*
+===============================================================================
 7. POLLING STATIONS
 ===============================================================================
 
@@ -478,6 +614,12 @@ CREATE TABLE polling_stations (
     CONSTRAINT fk_polling_station_special_area
         FOREIGN KEY (special_voting_area_id)
         REFERENCES special_voting_areas(special_voting_area_id)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT,
+
+    CONSTRAINT fk_polling_station_special_slot
+        FOREIGN KEY (special_voting_slot_id)
+        REFERENCES special_voting_slots(special_voting_slot_id)
         ON UPDATE CASCADE
         ON DELETE RESTRICT,
 
@@ -1495,6 +1637,9 @@ CREATE INDEX idx_polling_stations_registration_centre
 CREATE INDEX idx_polling_stations_special_area
     ON polling_stations(special_voting_area_id);
 
+CREATE INDEX idx_polling_stations_special_slot
+    ON polling_stations(special_voting_slot_id);
+
 
 CREATE INDEX idx_polling_stations_election_centre
     ON polling_stations(election_id, registration_centre_id);
@@ -1598,49 +1743,3 @@ Expected tables:
     turnout_reporting_intervals
     registration_centres
     result_submissions
-    source_documents
-    sources
-    source_comparisons
-    source_submissions
-    submission_validation_results
-    published_aggregate_totals
-    turnout_observations
-    wards
-
-===============================================================================
-*/
-
-
-/*
-===============================================================================
-15. FOREIGN KEY VERIFICATION
-===============================================================================
-
-Run this after creating the schema:
-
-    SELECT
-        tc.table_name,
-        kcu.column_name,
-        ccu.table_name AS referenced_table,
-        ccu.column_name AS referenced_column
-    FROM information_schema.table_constraints AS tc
-    JOIN information_schema.key_column_usage AS kcu
-        ON tc.constraint_name = kcu.constraint_name
-       AND tc.table_schema = kcu.table_schema
-    JOIN information_schema.constraint_column_usage AS ccu
-        ON ccu.constraint_name = tc.constraint_name
-       AND ccu.table_schema = tc.table_schema
-    WHERE tc.constraint_type = 'FOREIGN KEY'
-      AND tc.table_schema = 'public'
-    ORDER BY tc.table_name, kcu.column_name;
-
-===============================================================================
-*/
-
-
-/*
-===============================================================================
-END OF ETVS POSTGRESQL SCHEMA
-===============================================================================
-*/
-
