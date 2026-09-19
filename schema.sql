@@ -956,6 +956,8 @@ CREATE TABLE ballot_accounting_observations (
 
     spoilt_ballots INTEGER NOT NULL,
 
+    turnout_observation_id BIGINT,
+
     observed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
     source_document_id BIGINT,
