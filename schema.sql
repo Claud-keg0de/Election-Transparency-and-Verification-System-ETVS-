@@ -1566,6 +1566,7 @@ Expected tables:
     source_submissions
     submission_validation_results
     published_aggregate_totals
+    registered_voter_observations
     turnout_observations
     wards
 
