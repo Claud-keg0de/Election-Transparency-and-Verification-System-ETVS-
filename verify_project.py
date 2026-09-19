@@ -190,12 +190,22 @@ def main() -> int:
                 if affiliation_errors:
                     failures.append(f"Candidate affiliation errors: {affiliation_errors}")
 
+                missing_party_symbols = cur.execute("""
+                    SELECT COUNT(*) AS n
+                    FROM candidates c
+                    LEFT JOIN party_symbols ps ON ps.party_id=c.party_id AND ps.approved=TRUE
+                    WHERE c.election_id=%s AND c.candidate_type='PARTY' AND ps.party_symbol_id IS NULL
+                """,(args.election_id,)).fetchone()["n"]
+                if missing_party_symbols:
+                    failures.append(f"Party candidates without an approved party symbol: {missing_party_symbols}")
+
                 missing_independent_symbols = cur.execute("""
                     SELECT COUNT(*) AS n
                     FROM candidates c
                     LEFT JOIN independent_candidate_symbols s
                       ON s.candidate_id=c.candidate_id AND s.election_id=c.election_id
-                    WHERE c.election_id=%s AND c.candidate_type='INDEPENDENT' AND s.independent_symbol_id IS NULL
+                    WHERE c.election_id=%s AND c.candidate_type='INDEPENDENT'
+                      AND (s.independent_symbol_id IS NULL OR s.approved=FALSE)
                 """,(args.election_id,)).fetchone()["n"]
                 if missing_independent_symbols:
                     failures.append(f"Independent candidates without approved symbol records: {missing_independent_symbols}")
