@@ -153,17 +153,6 @@ def ensure_schema(cur) -> None:
     cur.execute("ALTER TABLE polling_stations ADD COLUMN IF NOT EXISTS turnout_reporting_interval_minutes INTEGER NOT NULL DEFAULT 30")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_registered_latest ON registered_voter_observations(election_id,polling_station_id,observation_version DESC)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_ballot_latest_position ON ballot_accounting_observations(election_id,polling_station_id,position_id,observation_version DESC)")
-    required_fks = (
-        ("fk_ballot_position", "ALTER TABLE ballot_accounting_observations ADD CONSTRAINT fk_ballot_position FOREIGN KEY (position_id) REFERENCES positions(position_id) ON UPDATE CASCADE ON DELETE RESTRICT"),
-        ("fk_ballot_turnout_observation", "ALTER TABLE ballot_accounting_observations ADD CONSTRAINT fk_ballot_turnout_observation FOREIGN KEY (turnout_observation_id) REFERENCES turnout_observations(turnout_observation_id) ON UPDATE CASCADE ON DELETE RESTRICT"),
-        ("fk_ballot_security_observation_station_election", "ALTER TABLE ballot_security_observations ADD CONSTRAINT fk_ballot_security_observation_station_election FOREIGN KEY (polling_station_id,election_id) REFERENCES polling_stations(polling_station_id,election_id) ON UPDATE CASCADE ON DELETE RESTRICT"),
-        ("fk_ballot_security_observation_specification", "ALTER TABLE ballot_security_observations ADD CONSTRAINT fk_ballot_security_observation_specification FOREIGN KEY (ballot_specification_id) REFERENCES ballot_specifications(ballot_specification_id) ON UPDATE CASCADE ON DELETE RESTRICT"),
-        ("fk_ballot_security_observation_batch", "ALTER TABLE ballot_security_observations ADD CONSTRAINT fk_ballot_security_observation_batch FOREIGN KEY (ballot_batch_id) REFERENCES ballot_stock_batches(ballot_batch_id) ON UPDATE CASCADE ON DELETE RESTRICT"),
-    )
-    for constraint_name, statement in required_fks:
-        if not cur.execute("""SELECT 1 FROM information_schema.table_constraints WHERE table_schema='public' AND constraint_name=%s""", (constraint_name,)).fetchone():
-            cur.execute(statement)
-
     cur.execute("""
         CREATE TABLE IF NOT EXISTS sources (
             source_id TEXT PRIMARY KEY, source_name TEXT NOT NULL, source_type TEXT NOT NULL,
@@ -256,6 +245,17 @@ def ensure_schema(cur) -> None:
     cur.execute("CREATE INDEX IF NOT EXISTS idx_ballot_stock_batches_lookup ON ballot_stock_batches(election_id,position_id,polling_station_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_ballot_security_observations_station ON ballot_security_observations(election_id,polling_station_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_ballot_security_observations_serial ON ballot_security_observations(election_id,ballot_specification_id,serial_number)")
+    required_fks = (
+        ("fk_ballot_position", "ALTER TABLE ballot_accounting_observations ADD CONSTRAINT fk_ballot_position FOREIGN KEY (position_id) REFERENCES positions(position_id) ON UPDATE CASCADE ON DELETE RESTRICT"),
+        ("fk_ballot_turnout_observation", "ALTER TABLE ballot_accounting_observations ADD CONSTRAINT fk_ballot_turnout_observation FOREIGN KEY (turnout_observation_id) REFERENCES turnout_observations(turnout_observation_id) ON UPDATE CASCADE ON DELETE RESTRICT"),
+        ("fk_ballot_security_observation_station_election", "ALTER TABLE ballot_security_observations ADD CONSTRAINT fk_ballot_security_observation_station_election FOREIGN KEY (polling_station_id,election_id) REFERENCES polling_stations(polling_station_id,election_id) ON UPDATE CASCADE ON DELETE RESTRICT"),
+        ("fk_ballot_security_observation_specification", "ALTER TABLE ballot_security_observations ADD CONSTRAINT fk_ballot_security_observation_specification FOREIGN KEY (ballot_specification_id) REFERENCES ballot_specifications(ballot_specification_id) ON UPDATE CASCADE ON DELETE RESTRICT"),
+        ("fk_ballot_security_observation_batch", "ALTER TABLE ballot_security_observations ADD CONSTRAINT fk_ballot_security_observation_batch FOREIGN KEY (ballot_batch_id) REFERENCES ballot_stock_batches(ballot_batch_id) ON UPDATE CASCADE ON DELETE RESTRICT"),
+    )
+    for constraint_name, statement in required_fks:
+        if not cur.execute("""SELECT 1 FROM information_schema.table_constraints WHERE table_schema='public' AND constraint_name=%s""", (constraint_name,)).fetchone():
+            cur.execute(statement)
+
 
     cur.execute("""
         CREATE TABLE IF NOT EXISTS published_aggregate_totals (
