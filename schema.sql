@@ -1471,11 +1471,26 @@ BEGIN
         RAISE EXCEPTION 'Cannot resolve polling station % and position %', NEW.polling_station_id, NEW.position_id;
     END IF;
 
-    IF station_area_type='NATIONAL' AND EXISTS (
-        SELECT 1 FROM polling_stations WHERE polling_station_id=NEW.polling_station_id AND location_type='SPECIAL'
+    IF EXISTS (
+        SELECT 1
+        FROM polling_stations ps
+        JOIN special_area_contest_rules sar
+          ON sar.special_voting_area_id=ps.special_voting_area_id
+         AND sar.position_id=NEW.position_id
+         AND sar.reference_year=(SELECT EXTRACT(YEAR FROM election_date)::INTEGER FROM elections WHERE election_id=NEW.election_id)
+         AND sar.eligibility_status='ALLOWED'
+        WHERE ps.polling_station_id=NEW.polling_station_id
+          AND ps.election_id=NEW.election_id
+          AND ps.location_type='SPECIAL'
     ) THEN
-        -- Special-area eligibility is separately modeled and remains configurable.
         RETURN NEW;
+    ELSIF EXISTS (
+        SELECT 1 FROM polling_stations
+        WHERE polling_station_id=NEW.polling_station_id
+          AND election_id=NEW.election_id
+          AND location_type='SPECIAL'
+    ) THEN
+        RAISE EXCEPTION 'Position % is not currently eligible at special polling station % for this election', NEW.position_id, NEW.polling_station_id;
     END IF;
 
     SELECT cea.electoral_area_type, cea.electoral_area_id
