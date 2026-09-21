@@ -247,6 +247,7 @@ def reset_sample(cur) -> None:
         "DELETE FROM audit_runs WHERE election_id=%s",
         "DELETE FROM ballot_security_feature_checks WHERE ballot_security_observation_id IN (SELECT ballot_security_observation_id FROM ballot_security_observations WHERE election_id=%s)",
         "DELETE FROM ballot_security_observations WHERE election_id=%s",
+        "DELETE FROM ballot_security_features WHERE election_id=%s",
         "DELETE FROM result_submissions WHERE election_id=%s",
         "DELETE FROM published_aggregate_totals WHERE election_id=%s",
         "DELETE FROM ballot_accounting_observations WHERE election_id=%s",
