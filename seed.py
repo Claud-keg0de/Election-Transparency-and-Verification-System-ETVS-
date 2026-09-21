@@ -456,7 +456,7 @@ def check(cur)->None:
         raise AssertionError("Turnout reporting intervals must be between 1 and 1440 minutes.")
     print("Turnout reporting intervals: PASS")
     print("\nETVS SEED VERIFICATION\n"+"="*82)
-    tables=("positions","elections","counties","constituencies","wards","registration_centres","polling_stations","registered_voter_observations","turnout_observations","ballot_accounting_observations","candidates","result_submissions","published_aggregate_totals","audit_runs","audit_findings")
+    tables=("positions","elections","counties","constituencies","wards","registration_centres","polling_stations","registered_voter_observations","turnout_observations","ballot_accounting_observations","ballot_security_features","ballot_security_observations","ballot_security_feature_checks","candidates","result_submissions","published_aggregate_totals","audit_runs","audit_findings")
     for table in tables:
         try: print(f"{table:38}{cur.execute(f'SELECT COUNT(*) AS n FROM {table}').fetchone()['n']:>7}")
         except psycopg.errors.UndefinedTable: print(f"{table:38} MISSING")
