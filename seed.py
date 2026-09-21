@@ -245,6 +245,8 @@ def reset_sample(cur) -> None:
         "DELETE FROM audit_failed_results WHERE election_id=%s",
         "DELETE FROM audit_findings WHERE election_id=%s",
         "DELETE FROM audit_runs WHERE election_id=%s",
+        "DELETE FROM ballot_security_feature_checks WHERE ballot_security_observation_id IN (SELECT ballot_security_observation_id FROM ballot_security_observations WHERE election_id=%s)",
+        "DELETE FROM ballot_security_observations WHERE election_id=%s",
         "DELETE FROM result_submissions WHERE election_id=%s",
         "DELETE FROM published_aggregate_totals WHERE election_id=%s",
         "DELETE FROM ballot_accounting_observations WHERE election_id=%s",
@@ -480,7 +482,7 @@ def main()->int:
             with conn.cursor() as cur:
                 ensure_schema(cur)
                 if a.reset:reset_sample(cur)
-                seed_positions(cur);source_doc,published_doc=seed_sources(cur);seed_master_data(cur);seed_observations(cur,source_doc);seed_results(cur,source_doc);seed_published_aggregates(cur,published_doc);ensure_reporting_views(cur);check(cur)
+                seed_positions(cur);source_doc,published_doc=seed_sources(cur);seed_master_data(cur);seed_security_features(cur);seed_observations(cur,source_doc);seed_results(cur,source_doc);seed_published_aggregates(cur,published_doc);ensure_reporting_views(cur);check(cur)
             conn.commit()
         print("\nSEED SUCCESS: PostgreSQL data committed successfully.");return 0
     except Exception as exc:print(f"\nSEED FAILED: {exc}");return 1
