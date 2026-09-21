@@ -586,6 +586,7 @@ def audit_election(election_id:str,scope:AuditScope)->tuple[int,list[dict],bool,
             if not rows:raise ValueError("No contest-specific ballot observations were found.")
             add_latest_result_times(cur,election_id,rows)
             findings=station_findings(rows,scope.position_id)
+            findings.extend(security_findings(cur,election_id,stations,scope.position_id))
             findings.extend(turnout_interval_findings(cur,election_id,stations))
             findings.extend(chronology_findings(rows,scope.position_id))
             findings.extend(result_changes(cur,election_id,stations,scope.position_id,scope.candidate_id))
