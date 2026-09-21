@@ -126,6 +126,35 @@ def ensure_schema(cur) -> None:
     cur.execute("ALTER TABLE positions ADD COLUMN IF NOT EXISTS observation_sequence INTEGER")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_registered_latest ON registered_voter_observations(election_id,polling_station_id,observation_version DESC)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_ballot_latest_position ON ballot_accounting_observations(election_id,polling_station_id,position_id,observation_version DESC)")
+    cur.execute("""CREATE TABLE IF NOT EXISTS ballot_security_features (
+        feature_id TEXT PRIMARY KEY, election_id TEXT NOT NULL REFERENCES elections(election_id),
+        feature_code TEXT NOT NULL, feature_name TEXT NOT NULL, feature_type TEXT NOT NULL,
+        description TEXT, required BOOLEAN NOT NULL DEFAULT TRUE,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE (election_id, feature_code)
+    )""")
+    cur.execute("""CREATE TABLE IF NOT EXISTS ballot_security_observations (
+        ballot_security_observation_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        election_id TEXT NOT NULL, polling_station_id TEXT NOT NULL,
+        position_id TEXT NOT NULL REFERENCES positions(position_id),
+        observation_version INTEGER NOT NULL DEFAULT 1,
+        ballots_checked INTEGER NOT NULL, security_valid_ballots INTEGER NOT NULL,
+        security_rejected_ballots INTEGER NOT NULL, spoilt_ballots INTEGER NOT NULL,
+        observed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        source_document_id BIGINT, source_reference TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE (election_id,polling_station_id,position_id,observation_version),
+        CHECK (security_valid_ballots + security_rejected_ballots = ballots_checked)
+    )""")
+    cur.execute("""CREATE TABLE IF NOT EXISTS ballot_security_feature_checks (
+        feature_check_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        ballot_security_observation_id BIGINT NOT NULL REFERENCES ballot_security_observations(ballot_security_observation_id) ON DELETE CASCADE,
+        feature_id TEXT NOT NULL REFERENCES ballot_security_features(feature_id),
+        ballots_checked INTEGER NOT NULL, passed_count INTEGER NOT NULL, failed_count INTEGER NOT NULL,
+        evidence_note TEXT,
+        UNIQUE (ballot_security_observation_id,feature_id),
+        CHECK (passed_count + failed_count = ballots_checked)
+    )""")
     cur.execute("""
         CREATE TABLE IF NOT EXISTS sources (
             source_id TEXT PRIMARY KEY, source_name TEXT NOT NULL, source_type TEXT NOT NULL,
