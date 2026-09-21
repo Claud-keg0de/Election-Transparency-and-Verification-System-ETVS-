@@ -107,6 +107,35 @@ def ensure_runtime_columns(cur) -> None:
     cur.execute("ALTER TABLE audit_findings ADD COLUMN IF NOT EXISTS position_id TEXT")
     cur.execute("ALTER TABLE audit_findings ADD COLUMN IF NOT EXISTS actual_label TEXT NOT NULL DEFAULT 'Actual value'")
     cur.execute("ALTER TABLE audit_findings ADD COLUMN IF NOT EXISTS comparison_label TEXT NOT NULL DEFAULT 'Comparison value'")
+    cur.execute("""CREATE TABLE IF NOT EXISTS ballot_security_features (
+        feature_id TEXT PRIMARY KEY, election_id TEXT NOT NULL REFERENCES elections(election_id),
+        feature_code TEXT NOT NULL, feature_name TEXT NOT NULL, feature_type TEXT NOT NULL,
+        description TEXT, required BOOLEAN NOT NULL DEFAULT TRUE,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE (election_id, feature_code)
+    )""")
+    cur.execute("""CREATE TABLE IF NOT EXISTS ballot_security_observations (
+        ballot_security_observation_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        election_id TEXT NOT NULL, polling_station_id TEXT NOT NULL,
+        position_id TEXT NOT NULL REFERENCES positions(position_id),
+        observation_version INTEGER NOT NULL DEFAULT 1,
+        ballots_checked INTEGER NOT NULL, security_valid_ballots INTEGER NOT NULL,
+        security_rejected_ballots INTEGER NOT NULL, spoilt_ballots INTEGER NOT NULL,
+        observed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        source_document_id BIGINT, source_reference TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE (election_id,polling_station_id,position_id,observation_version),
+        CHECK (security_valid_ballots + security_rejected_ballots = ballots_checked)
+    )""")
+    cur.execute("""CREATE TABLE IF NOT EXISTS ballot_security_feature_checks (
+        feature_check_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        ballot_security_observation_id BIGINT NOT NULL REFERENCES ballot_security_observations(ballot_security_observation_id) ON DELETE CASCADE,
+        feature_id TEXT NOT NULL REFERENCES ballot_security_features(feature_id),
+        ballots_checked INTEGER NOT NULL, passed_count INTEGER NOT NULL, failed_count INTEGER NOT NULL,
+        evidence_note TEXT,
+        UNIQUE (ballot_security_observation_id,feature_id),
+        CHECK (passed_count + failed_count = ballots_checked)
+    )""")
 
 
 def scoped_station_ids(cur, election_id: str, scope: AuditScope) -> set[str]:
