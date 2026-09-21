@@ -395,6 +395,51 @@ def integrity_findings(cur,election_id:str,station_ids:set[str],position_id:str|
     return out
 
 
+def security_findings(cur,election_id:str,station_ids:set[str],position_id:str|None)->list[Finding]:
+    """R015: valid ballots must pass every required security feature."""
+    rows=cur.execute("""SELECT DISTINCT ON (b.polling_station_id,b.position_id)
+        b.ballot_security_observation_id,b.polling_station_id,b.position_id,
+        b.ballots_checked,b.security_valid_ballots,b.security_rejected_ballots,b.spoilt_ballots
+        FROM ballot_security_observations b
+        WHERE b.election_id=%s AND b.polling_station_id=ANY(%s)
+          AND (%s::TEXT IS NULL OR b.position_id=%s::TEXT)
+        ORDER BY b.polling_station_id,b.position_id,b.observation_version DESC""",
+        (election_id,list(station_ids),position_id,position_id)).fetchall()
+    required=cur.execute("""SELECT feature_id,feature_code FROM ballot_security_features
+        WHERE election_id=%s AND required=TRUE ORDER BY feature_code""",(election_id,)).fetchall()
+    out=[]
+    for r in rows:
+        checks=cur.execute("""SELECT f.feature_id,c.ballots_checked,c.passed_count,c.failed_count
+            FROM ballot_security_feature_checks c
+            JOIN ballot_security_features f ON f.feature_id=c.feature_id
+            WHERE c.ballot_security_observation_id=%s AND f.required=TRUE""",
+            (r["ballot_security_observation_id"],)).fetchall()
+        cmap={c["feature_id"]:c for c in checks}
+        missing=[f["feature_code"] for f in required if f["feature_id"] not in cmap]
+        inconsistent=[]
+        for f in required:
+            c=cmap.get(f["feature_id"])
+            if c and (c["ballots_checked"]!=r["ballots_checked"]
+                      or c["passed_count"]!=r["security_valid_ballots"]
+                      or c["passed_count"]+c["failed_count"]!=c["ballots_checked"]):
+                inconsistent.append(f["feature_code"])
+        ballot=cur.execute("""SELECT valid_votes,rejected_votes,spoilt_ballots
+            FROM ballot_accounting_observations
+            WHERE election_id=%s AND polling_station_id=%s AND position_id=%s
+            ORDER BY observation_version DESC LIMIT 1""",
+            (election_id,r["polling_station_id"],r["position_id"])).fetchone()
+        ok=bool(required) and not missing and not inconsistent and ballot is not None            and r["security_valid_ballots"]==ballot["valid_votes"]            and r["security_rejected_ballots"]==ballot["rejected_votes"]            and r["spoilt_ballots"]==ballot["spoilt_ballots"]            and r["ballots_checked"]==r["security_valid_ballots"]+r["security_rejected_ballots"]
+        msg=(f"{r['polling_station_id']} {r['position_id']}: {r['security_valid_ballots']} ballots passed every required security feature; "
+             f"{r['security_rejected_ballots']} failed security and are rejected; "
+             f"{r['spoilt_ballots']} damaged/spoilt ballots are excluded from votes cast.")
+        if missing: msg+=f" Missing feature checks: {', '.join(missing)}."
+        if inconsistent: msg+=f" Inconsistent feature checks: {', '.join(inconsistent)}."
+        out.append(Finding("R015",PASSED if ok else FAILED,msg,r["security_valid_ballots"],
+            ballot["valid_votes"] if ballot else None,r["polling_station_id"],None,"POLLING_STATION",
+            r["polling_station_id"],r["position_id"],"Security-Valid Ballots","Valid Votes"))
+    return out
+
+
 def aggregate_findings(cur,election_id:str,scope:AuditScope,station_ids:set[str],allowed:set[tuple[str,str]])->list[Finding]:
     """Compare each contest only at its own geography; turnout is checked at all levels."""
     rows=cur.execute("""
