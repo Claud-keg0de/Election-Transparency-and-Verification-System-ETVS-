@@ -25,6 +25,20 @@ REQUIRED_COLUMNS = {
         "candidate_id", "result_version", "votes", "position_id",
         "submission_hash", "source_document_id",
     },
+    "ballot_security_features": {
+        "feature_id", "election_id", "feature_code", "feature_name",
+        "feature_type", "required"
+    },
+    "ballot_security_observations": {
+        "ballot_security_observation_id", "election_id", "polling_station_id",
+        "position_id", "observation_version", "ballots_checked",
+        "security_valid_ballots", "security_rejected_ballots", "spoilt_ballots",
+        "observed_at"
+    },
+    "ballot_security_feature_checks": {
+        "feature_check_id", "ballot_security_observation_id", "feature_id",
+        "ballots_checked", "passed_count", "failed_count"
+    },
     "published_aggregate_totals": {
         "published_aggregate_id", "election_id", "source_document_id",
         "aggregation_level", "geography_id", "candidate_id", "position_id",
