@@ -287,6 +287,24 @@ def seed_master_data(cur) -> None:
             """,(cid,ELECTION_ID,name,pname))
 
 
+def seed_security_features(cur) -> None:
+    """Seed the required security controls for every contest ballot."""
+    features = (
+        ("SEC-SERIAL","SERIAL_NUMBER","Unique ballot serial number","IDENTIFIER"),
+        ("SEC-COLOR","BALLOT_COLOR","Contest ballot color","VISUAL"),
+        ("SEC-WATERMARK","WATERMARK","Security watermark","SECURITY_PRINT"),
+        ("SEC-STAMP","IEBC_STAMP","IEBC stamp","AUTHENTICATION"),
+        ("SEC-PAPER","PAPER_TYPE","Specified ballot paper type","MATERIAL"),
+    )
+    for fid,code,name,ftype in features:
+        cur.execute("""INSERT INTO ballot_security_features
+            (feature_id,election_id,feature_code,feature_name,feature_type,description,required)
+            VALUES(%s,%s,%s,%s,%s,%s,TRUE)
+            ON CONFLICT(feature_id) DO UPDATE SET feature_name=EXCLUDED.feature_name,
+                feature_type=EXCLUDED.feature_type,description=EXCLUDED.description,required=TRUE
+        """,(fid,ELECTION_ID,code,name,ftype,"Required security feature for every contest ballot."))
+
+
 def seed_observations(cur,source_document_id:int) -> None:
     """Create registered, shared turnout, and six contest-specific ballot streams."""
     base=datetime(2027,8,10,8,0,tzinfo=timezone.utc)
