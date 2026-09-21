@@ -338,6 +338,30 @@ def seed_observations(cur,source_document_id:int) -> None:
                 rejected_votes=EXCLUDED.rejected_votes,spoilt_ballots=EXCLUDED.spoilt_ballots,turnout_observation_id=EXCLUDED.turnout_observation_id,
                 source_document_id=EXCLUDED.source_document_id,source_reference=EXCLUDED.source_reference,observed_at=EXCLUDED.observed_at
             """,(ELECTION_ID,s.station_id,pid,valid,rejected,spoilt,turnout_id,source_document_id,f"SEED-BALLOT-{s.station_id}-{pid}",when))
+            security_row=cur.execute("""INSERT INTO ballot_security_observations
+                (election_id,polling_station_id,position_id,observation_version,ballots_checked,
+                 security_valid_ballots,security_rejected_ballots,spoilt_ballots,observed_at,
+                 source_document_id,source_reference)
+                VALUES(%s,%s,%s,1,%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT(election_id,polling_station_id,position_id,observation_version)
+                DO UPDATE SET ballots_checked=EXCLUDED.ballots_checked,
+                    security_valid_ballots=EXCLUDED.security_valid_ballots,
+                    security_rejected_ballots=EXCLUDED.security_rejected_ballots,
+                    spoilt_ballots=EXCLUDED.spoilt_ballots,observed_at=EXCLUDED.observed_at,
+                    source_document_id=EXCLUDED.source_document_id,source_reference=EXCLUDED.source_reference
+                RETURNING ballot_security_observation_id
+            """,(ELECTION_ID,s.station_id,pid,valid+rejected,valid,rejected,spoilt,when,
+                  source_document_id,f"SEED-SECURITY-{s.station_id}-{pid}")).fetchone()["ballot_security_observation_id"]
+            for feature_id in ("SEC-SERIAL","SEC-COLOR","SEC-WATERMARK","SEC-STAMP","SEC-PAPER"):
+                cur.execute("""INSERT INTO ballot_security_feature_checks
+                    (ballot_security_observation_id,feature_id,ballots_checked,passed_count,failed_count,evidence_note)
+                    VALUES(%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT(ballot_security_observation_id,feature_id)
+                    DO UPDATE SET ballots_checked=EXCLUDED.ballots_checked,
+                        passed_count=EXCLUDED.passed_count,failed_count=EXCLUDED.failed_count,
+                        evidence_note=EXCLUDED.evidence_note
+                """,(security_row,feature_id,valid+rejected,valid,rejected,
+                      "Controlled sample: valid ballots pass every required feature; rejected ballots fail one or more required checks."))
 
 
 def votes_for(valid:int,split:tuple[float,float,float])->tuple[int,int,int]:
