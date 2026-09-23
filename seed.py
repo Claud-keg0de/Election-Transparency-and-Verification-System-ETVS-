@@ -124,6 +124,20 @@ def ensure_schema(cur) -> None:
     cur.execute("ALTER TABLE result_submissions ADD COLUMN IF NOT EXISTS observed_at TIMESTAMPTZ")
     cur.execute("ALTER TABLE positions ADD COLUMN IF NOT EXISTS ballot_code TEXT")
     cur.execute("ALTER TABLE positions ADD COLUMN IF NOT EXISTS observation_sequence INTEGER")
+    cur.execute("""CREATE TABLE IF NOT EXISTS ballot_specifications (
+        ballot_specification_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, election_id TEXT NOT NULL REFERENCES elections(election_id), position_id TEXT NOT NULL REFERENCES positions(position_id),
+        ballot_code TEXT NOT NULL, ballot_color TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(election_id,position_id), UNIQUE(election_id,ballot_code))""")
+    cur.execute("""CREATE TABLE IF NOT EXISTS ballot_stock_batches (
+        ballot_stock_batch_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, election_id TEXT NOT NULL REFERENCES elections(election_id), polling_station_id TEXT NOT NULL,
+        position_id TEXT NOT NULL REFERENCES positions(position_id), ballot_specification_id BIGINT NOT NULL REFERENCES ballot_specifications(ballot_specification_id), serial_start BIGINT NOT NULL, serial_end BIGINT NOT NULL, allocated_quantity INTEGER NOT NULL,
+        source_document_id BIGINT, source_reference TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP, CHECK(serial_end>=serial_start), CHECK(allocated_quantity>0), CHECK(allocated_quantity=serial_end-serial_start+1), UNIQUE(election_id,polling_station_id,position_id,serial_start,serial_end))""")
+    cur.execute("""CREATE TABLE IF NOT EXISTS ballot_units (
+        ballot_unit_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, election_id TEXT NOT NULL REFERENCES elections(election_id), polling_station_id TEXT NOT NULL,
+        position_id TEXT NOT NULL REFERENCES positions(position_id), ballot_stock_batch_id BIGINT NOT NULL REFERENCES ballot_stock_batches(ballot_stock_batch_id), ballot_serial_number BIGINT NOT NULL, counterfoil_serial_number BIGINT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'ALLOCATED', issued_at TIMESTAMPTZ, cast_at TIMESTAMPTZ, source_document_id BIGINT, source_reference TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        CHECK(ballot_serial_number=counterfoil_serial_number), CHECK(status IN ('ALLOCATED','ISSUED','CAST','COUNTED','UNUSED','REJECTED','SPOILT','CANCELLED')), UNIQUE(election_id,position_id,ballot_serial_number), UNIQUE(election_id,position_id,counterfoil_serial_number))""")
+    cur.execute("ALTER TABLE ballot_security_observations ADD COLUMN IF NOT EXISTS observed_ballot_color TEXT")
+
     cur.execute("CREATE INDEX IF NOT EXISTS idx_registered_latest ON registered_voter_observations(election_id,polling_station_id,observation_version DESC)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_ballot_latest_position ON ballot_accounting_observations(election_id,polling_station_id,position_id,observation_version DESC)")
     cur.execute("""CREATE TABLE IF NOT EXISTS ballot_security_features (
@@ -290,6 +304,27 @@ def seed_master_data(cur) -> None:
             """,(cid,ELECTION_ID,name,pname))
 
 
+
+
+def seed_ballot_inventory(cur,source_document_id:int) -> None:
+    colors={"POS-PRESIDENT":"WHITE","POS-GOVERNOR":"BLUE","POS-SENATOR":"YELLOW","POS-WOMEN-REP":"PURPLE","POS-MP":"GREEN","POS-MCA":"GREY"}
+    for pid,pname,_,_,ballot_code,seq in POSITIONS:
+        cur.execute("""INSERT INTO ballot_specifications(election_id,position_id,ballot_code,ballot_color) VALUES(%s,%s,%s,%s)
+                       ON CONFLICT(election_id,position_id) DO UPDATE SET ballot_code=EXCLUDED.ballot_code,ballot_color=EXCLUDED.ballot_color""",(ELECTION_ID,pid,ballot_code,colors.get(pid,"UNSPECIFIED")))
+    for si,st in enumerate(STATIONS):
+        for pi,(pid,*_) in enumerate(POSITIONS):
+            spec=cur.execute("SELECT ballot_specification_id FROM ballot_specifications WHERE election_id=%s AND position_id=%s",(ELECTION_ID,pid)).fetchone()
+            start=1000000+si*100000+pi*10000; end=start+st.registered-1
+            batch=cur.execute("""INSERT INTO ballot_stock_batches(election_id,polling_station_id,position_id,ballot_specification_id,serial_start,serial_end,allocated_quantity,source_document_id,source_reference)
+                VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(election_id,polling_station_id,position_id,serial_start,serial_end)
+                DO UPDATE SET allocated_quantity=EXCLUDED.allocated_quantity,source_document_id=EXCLUDED.source_document_id,source_reference=EXCLUDED.source_reference RETURNING ballot_stock_batch_id""",
+                (ELECTION_ID,st.station_id,pid,spec["ballot_specification_id"],start,end,st.registered,source_document_id,f"SEED-STOCK-{st.station_id}-{pid}")).fetchone()
+            for n in range(min(st.turnout,5)):
+                serial=start+n
+                cur.execute("""INSERT INTO ballot_units(election_id,polling_station_id,position_id,ballot_stock_batch_id,ballot_serial_number,counterfoil_serial_number,status,source_document_id,source_reference)
+                    VALUES(%s,%s,%s,%s,%s,%s,'CAST',%s,%s) ON CONFLICT(election_id,position_id,ballot_serial_number) DO UPDATE SET ballot_stock_batch_id=EXCLUDED.ballot_stock_batch_id,counterfoil_serial_number=EXCLUDED.counterfoil_serial_number,status=EXCLUDED.status,source_document_id=EXCLUDED.source_document_id,source_reference=EXCLUDED.source_reference""",
+                    (ELECTION_ID,st.station_id,pid,batch["ballot_stock_batch_id"],serial,serial,source_document_id,f"SEED-BALLOT-UNIT-{st.station_id}-{pid}-{serial}"))
+
 def seed_security_features(cur) -> None:
     """Seed the required security controls for every contest ballot."""
     features = (
@@ -343,9 +378,9 @@ def seed_observations(cur,source_document_id:int) -> None:
             """,(ELECTION_ID,s.station_id,pid,valid,rejected,spoilt,turnout_id,source_document_id,f"SEED-BALLOT-{s.station_id}-{pid}",when))
             security_row=cur.execute("""INSERT INTO ballot_security_observations
                 (election_id,polling_station_id,position_id,observation_version,ballots_checked,
-                 security_valid_ballots,security_rejected_ballots,spoilt_ballots,observed_at,
+                 security_valid_ballots,security_rejected_ballots,spoilt_ballots,observed_ballot_color,observed_at,
                  source_document_id,source_reference)
-                VALUES(%s,%s,%s,1,%s,%s,%s,%s,%s,%s,%s)
+                VALUES(%s,%s,%s,1,%s,%s,%s,%s,%s,%s,%s,%s)
                 ON CONFLICT(election_id,polling_station_id,position_id,observation_version)
                 DO UPDATE SET ballots_checked=EXCLUDED.ballots_checked,
                     security_valid_ballots=EXCLUDED.security_valid_ballots,
@@ -353,7 +388,8 @@ def seed_observations(cur,source_document_id:int) -> None:
                     spoilt_ballots=EXCLUDED.spoilt_ballots,observed_at=EXCLUDED.observed_at,
                     source_document_id=EXCLUDED.source_document_id,source_reference=EXCLUDED.source_reference
                 RETURNING ballot_security_observation_id
-            """,(ELECTION_ID,s.station_id,pid,valid+rejected,valid,rejected,spoilt,when,
+            """,(ELECTION_ID,s.station_id,pid,valid+rejected,valid,rejected,spoilt,
+                  {"POS-PRESIDENT":"WHITE","POS-GOVERNOR":"BLUE","POS-SENATOR":"YELLOW","POS-WOMEN-REP":"PURPLE","POS-MP":"GREEN","POS-MCA":"GREY"}[pid],when,
                   source_document_id,f"SEED-SECURITY-{s.station_id}-{pid}")).fetchone()["ballot_security_observation_id"]
             for feature_id in ("SEC-SERIAL","SEC-COLOR","SEC-WATERMARK","SEC-STAMP","SEC-PAPER"):
                 cur.execute("""INSERT INTO ballot_security_feature_checks
@@ -483,7 +519,7 @@ def main()->int:
             with conn.cursor() as cur:
                 ensure_schema(cur)
                 if a.reset:reset_sample(cur)
-                seed_positions(cur);source_doc,published_doc=seed_sources(cur);seed_master_data(cur);seed_security_features(cur);seed_observations(cur,source_doc);seed_results(cur,source_doc);seed_published_aggregates(cur,published_doc);ensure_reporting_views(cur);check(cur)
+                seed_positions(cur);source_doc,published_doc=seed_sources(cur);seed_master_data(cur);seed_ballot_inventory(cur,source_doc);seed_security_features(cur);seed_observations(cur,source_doc);seed_results(cur,source_doc);seed_published_aggregates(cur,published_doc);ensure_reporting_views(cur);check(cur)
             conn.commit()
         print("\nSEED SUCCESS: PostgreSQL data committed successfully.");return 0
     except Exception as exc:print(f"\nSEED FAILED: {exc}");return 1

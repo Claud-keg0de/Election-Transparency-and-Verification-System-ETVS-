@@ -14,7 +14,14 @@ Design rules:
     R011  Registered-voter observations precede turnout observations.
     R012  Turnout observation precedes contest ballot accounting.
     R013  Contest ballot accounting precedes candidate result publication.
-    R014  Successive turnout observations respect the station-specific reporting interval.
+    R014  Every contest has an election-specific ballot specification.
+    R015  Observed ballot colour matches the stored specification.
+    R016  Ballot stock serial ranges have positive, internally consistent quantities.
+    R017  Required security features have supporting observations.
+    R018  Observed serialized ballots fall inside allocated stock ranges and match counterfoils.
+    R019  Observed serialized ballot numbers are not duplicated within an election/contest.
+    R020  Ballot stock batches use the specification for their contest.
+    R021  Successive turnout observations respect the station-specific reporting interval.
 
 Important: turnout is deliberately NOT duplicated into six independent turnout
 figures. Every contest at a polling station references the same final turnout
@@ -275,7 +282,7 @@ def turnout_interval_findings(cur,election_id:str,station_ids:set[str])->list[Fi
         sid=st["polling_station_id"]; interval=st["turnout_reporting_interval_minutes"]
         obs=by_station.get(sid,[])
         if interval is None or interval < 1:
-            out.append(Finding("R014",FAILED,
+            out.append(Finding("R021",FAILED,
                 f"{sid}: turnout reporting interval is missing or invalid ({interval}).",
                 interval,1,sid,None,"POLLING_STATION",sid,None,
                 "Configured Interval (minutes)","Minimum Allowed (minutes)"))
@@ -289,7 +296,7 @@ def turnout_interval_findings(cur,election_id:str,station_ids:set[str])->list[Fi
             if elapsed < interval:
                 violations.append(f"{previous['observation_version']}→{current['observation_version']} elapsed {elapsed:g} minutes")
         ok=not violations
-        out.append(Finding("R014",PASSED if ok else FAILED,
+        out.append(Finding("R021",PASSED if ok else FAILED,
             f"{sid}: successive turnout observations {'respect' if ok else 'violate'} the configured minimum interval of {interval} minutes."
             + ("" if ok else " Violations: "+", ".join(violations)+"."),
             interval,interval,sid,None,"POLLING_STATION",sid,None,
@@ -395,8 +402,42 @@ def integrity_findings(cur,election_id:str,station_ids:set[str],position_id:str|
     return out
 
 
+
+
+def ballot_inventory_findings(cur,election_id:str,station_ids:set[str],position_id:str|None)->list[Finding]:
+    """R014-R020: reconcile specifications, stock, security observations and anonymous ballot/counterfoil units."""
+    out=[]
+    specs=cur.execute("SELECT ballot_specification_id,position_id,ballot_code,ballot_color FROM ballot_specifications WHERE election_id=%s",(election_id,)).fetchall()
+    spec_by_pos={r["position_id"]:r for r in specs}
+    positions=cur.execute("SELECT position_id FROM positions ORDER BY COALESCE(observation_sequence,999),position_id").fetchall()
+    for p in positions:
+        pid=p["position_id"]
+        if position_id and pid!=position_id: continue
+        sp=spec_by_pos.get(pid); ok=sp is not None and bool(sp["ballot_code"]) and sp["ballot_color"] is not None
+        out.append(Finding("R014",PASSED if ok else FAILED,f"{pid}: election-specific ballot specification {'exists' if ok else 'is missing or incomplete'}.",1 if ok else 0,1,None,None,"ELECTION",election_id,pid,"Specification Present","Required"))
+    stocks=cur.execute("SELECT ballot_stock_batch_id,polling_station_id,position_id,ballot_specification_id,serial_start,serial_end,allocated_quantity FROM ballot_stock_batches WHERE election_id=%s AND polling_station_id=ANY(%s)",(election_id,list(station_ids))).fetchall()
+    for b in stocks:
+        if position_id and b["position_id"]!=position_id: continue
+        expected=b["serial_end"]-b["serial_start"]+1; ok=b["serial_start"]>0 and b["serial_end"]>=b["serial_start"] and b["allocated_quantity"]==expected and b["allocated_quantity"]>0
+        out.append(Finding("R016",PASSED if ok else FAILED,f"{b['polling_station_id']} {b['position_id']}: ballot stock range is {'internally consistent' if ok else 'invalid'}.",b["allocated_quantity"],expected,b["polling_station_id"],None,"POLLING_STATION",b["polling_station_id"],b["position_id"],"Allocated Ballots","Serial Range Quantity"))
+        sp=spec_by_pos.get(b["position_id"]); ok=sp is not None and b["ballot_specification_id"]==sp["ballot_specification_id"]
+        out.append(Finding("R020",PASSED if ok else FAILED,f"{b['polling_station_id']} {b['position_id']}: stock batch {'uses' if ok else 'does not use'} its election-specific specification.",b["ballot_specification_id"],sp["ballot_specification_id"] if sp else None,b["polling_station_id"],None,"POLLING_STATION",b["polling_station_id"],b["position_id"],"Stock Specification ID","Required Specification ID"))
+        units=cur.execute("SELECT ballot_serial_number,counterfoil_serial_number FROM ballot_units WHERE ballot_stock_batch_id=%s",(b["ballot_stock_batch_id"],)).fetchall()
+        bad=[u for u in units if u["ballot_serial_number"]<b["serial_start"] or u["ballot_serial_number"]>b["serial_end"] or u["counterfoil_serial_number"]!=u["ballot_serial_number"]]
+        out.append(Finding("R018",PASSED if not bad else FAILED,f"{b['polling_station_id']} {b['position_id']}: serialized ballot units {'match their counterfoils and stock range' if not bad else 'contain range or counterfoil mismatches'}.",len(units)-len(bad),len(units),b["polling_station_id"],None,"POLLING_STATION",b["polling_station_id"],b["position_id"],"Valid Serialized Units","Observed Serialized Units"))
+    dup=cur.execute("SELECT position_id,ballot_serial_number,COUNT(*) n FROM ballot_units WHERE election_id=%s AND polling_station_id=ANY(%s) GROUP BY position_id,ballot_serial_number HAVING COUNT(*)>1",(election_id,list(station_ids))).fetchall()
+    if position_id: dup=[d for d in dup if d["position_id"]==position_id]
+    out.append(Finding("R019",PASSED if not dup else FAILED,f"Serialized ballot numbers are unique." if not dup else f"Duplicate serialized ballot groups detected: {len(dup)}.",len(dup),0,None,None,"ELECTION",election_id,position_id,"Duplicate Serial Groups","Required Duplicate Groups"))
+    colors=cur.execute("SELECT position_id,observed_ballot_color,COUNT(*) n FROM ballot_security_observations WHERE election_id=%s AND polling_station_id=ANY(%s) AND observed_ballot_color IS NOT NULL GROUP BY position_id,observed_ballot_color",(election_id,list(station_ids))).fetchall()
+    for r in colors:
+        if position_id and r["position_id"]!=position_id: continue
+        sp=spec_by_pos.get(r["position_id"]); ok=sp is not None and r["observed_ballot_color"]==sp["ballot_color"]
+        out.append(Finding("R015",PASSED if ok else FAILED,f"{r['position_id']}: observed ballot colour {r['observed_ballot_color']} {'matches' if ok else 'does not match'} the stored specification.",1 if ok else 0,1,None,None,"ELECTION",election_id,r["position_id"],"Ballot Colour Match","Required Match"))
+    return out
+
+
 def security_findings(cur,election_id:str,station_ids:set[str],position_id:str|None)->list[Finding]:
-    """R015: valid ballots must pass every required security feature."""
+    """R017: valid ballots must pass every required security feature."""
     rows=cur.execute("""SELECT DISTINCT ON (b.polling_station_id,b.position_id)
         b.ballot_security_observation_id,b.polling_station_id,b.position_id,
         b.ballots_checked,b.security_valid_ballots,b.security_rejected_ballots,b.spoilt_ballots
@@ -434,7 +475,7 @@ def security_findings(cur,election_id:str,station_ids:set[str],position_id:str|N
              f"{r['spoilt_ballots']} damaged/spoilt ballots are excluded from votes cast.")
         if missing: msg+=f" Missing feature checks: {', '.join(missing)}."
         if inconsistent: msg+=f" Inconsistent feature checks: {', '.join(inconsistent)}."
-        out.append(Finding("R015",PASSED if ok else FAILED,msg,r["security_valid_ballots"],
+        out.append(Finding("R017",PASSED if ok else FAILED,msg,r["security_valid_ballots"],
             ballot["valid_votes"] if ballot else None,r["polling_station_id"],None,"POLLING_STATION",
             r["polling_station_id"],r["position_id"],"Security-Valid Ballots","Valid Votes"))
     return out
@@ -586,6 +627,7 @@ def audit_election(election_id:str,scope:AuditScope)->tuple[int,list[dict],bool,
             if not rows:raise ValueError("No contest-specific ballot observations were found.")
             add_latest_result_times(cur,election_id,rows)
             findings=station_findings(rows,scope.position_id)
+            findings.extend(ballot_inventory_findings(cur,election_id,stations,scope.position_id))
             findings.extend(security_findings(cur,election_id,stations,scope.position_id))
             findings.extend(turnout_interval_findings(cur,election_id,stations))
             findings.extend(chronology_findings(rows,scope.position_id))
