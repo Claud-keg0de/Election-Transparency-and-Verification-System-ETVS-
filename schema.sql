@@ -653,6 +653,24 @@ CREATE TABLE turnout_observations (
 );
 
 
+
+CREATE TABLE registered_voter_observations (
+    registered_voter_observation_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    election_id TEXT NOT NULL,
+    polling_station_id TEXT NOT NULL,
+    observation_version INTEGER NOT NULL DEFAULT 1,
+    registered_voters INTEGER NOT NULL,
+    observed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    source_document_id BIGINT,
+    source_reference TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (election_id) REFERENCES elections(election_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+    FOREIGN KEY (polling_station_id,election_id) REFERENCES polling_stations(polling_station_id,election_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+    FOREIGN KEY (source_document_id) REFERENCES source_documents(document_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+    CHECK (observation_version>0), CHECK (registered_voters>=0), UNIQUE(election_id,polling_station_id,observation_version)
+);
+CREATE INDEX idx_registered_voter_latest ON registered_voter_observations(election_id,polling_station_id,observation_version DESC);
+
 /*
 ===============================================================================
 9. BALLOT ACCOUNTING OBSERVATIONS
@@ -751,6 +769,45 @@ A ballot failing one or more required security features is rejected.
 A physically damaged ballot is spoilt and is excluded from votes cast/turnout.
 ===============================================================================
 */
+
+CREATE TABLE ballot_specifications (
+    ballot_specification_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    election_id TEXT NOT NULL, position_id TEXT NOT NULL, ballot_code TEXT NOT NULL, ballot_color TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(election_id) REFERENCES elections(election_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+    FOREIGN KEY(position_id) REFERENCES positions(position_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+    UNIQUE(election_id,position_id), UNIQUE(election_id,ballot_code)
+);
+CREATE TABLE ballot_stock_batches (
+    ballot_stock_batch_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    election_id TEXT NOT NULL, polling_station_id TEXT NOT NULL, position_id TEXT NOT NULL, ballot_specification_id BIGINT NOT NULL,
+    serial_start BIGINT NOT NULL, serial_end BIGINT NOT NULL, allocated_quantity INTEGER NOT NULL,
+    source_document_id BIGINT, source_reference TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(election_id) REFERENCES elections(election_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+    FOREIGN KEY(polling_station_id,election_id) REFERENCES polling_stations(polling_station_id,election_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+    FOREIGN KEY(position_id) REFERENCES positions(position_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+    FOREIGN KEY(ballot_specification_id) REFERENCES ballot_specifications(ballot_specification_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+    FOREIGN KEY(source_document_id) REFERENCES source_documents(document_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+    CHECK(serial_end>=serial_start), CHECK(allocated_quantity>0), CHECK(allocated_quantity=serial_end-serial_start+1),
+    UNIQUE(election_id,polling_station_id,position_id,serial_start,serial_end)
+);
+CREATE TABLE ballot_units (
+    ballot_unit_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    election_id TEXT NOT NULL, polling_station_id TEXT NOT NULL, position_id TEXT NOT NULL, ballot_stock_batch_id BIGINT NOT NULL,
+    ballot_serial_number BIGINT NOT NULL, counterfoil_serial_number BIGINT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'ALLOCATED', issued_at TIMESTAMPTZ, cast_at TIMESTAMPTZ,
+    source_document_id BIGINT, source_reference TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(election_id) REFERENCES elections(election_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+    FOREIGN KEY(polling_station_id,election_id) REFERENCES polling_stations(polling_station_id,election_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+    FOREIGN KEY(position_id) REFERENCES positions(position_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+    FOREIGN KEY(ballot_stock_batch_id) REFERENCES ballot_stock_batches(ballot_stock_batch_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+    FOREIGN KEY(source_document_id) REFERENCES source_documents(document_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+    CHECK(ballot_serial_number=counterfoil_serial_number),
+    CHECK(status IN ('ALLOCATED','ISSUED','CAST','COUNTED','UNUSED','REJECTED','SPOILT','CANCELLED')),
+    UNIQUE(election_id,position_id,ballot_serial_number), UNIQUE(election_id,position_id,counterfoil_serial_number)
+);
+CREATE INDEX idx_ballot_units_station_position ON ballot_units(election_id,polling_station_id,position_id);
+
 CREATE TABLE ballot_security_features (
     feature_id TEXT PRIMARY KEY,
     election_id TEXT NOT NULL,
@@ -776,6 +833,7 @@ CREATE TABLE ballot_security_observations (
     security_valid_ballots INTEGER NOT NULL,
     security_rejected_ballots INTEGER NOT NULL,
     spoilt_ballots INTEGER NOT NULL,
+    observed_ballot_color TEXT,
     observed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     source_document_id BIGINT,
     source_reference TEXT,
