@@ -896,7 +896,7 @@ CREATE TABLE ballot_security_observations (
             'FAIL',
             'NOT_VERIFIED',
             'NOT_PRESENT'
-        )),
+        ))
 
 );
 
