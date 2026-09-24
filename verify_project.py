@@ -211,9 +211,9 @@ def main() -> int:
                     JOIN ballot_stock_batches b ON b.ballot_batch_id = u.ballot_batch_id
                     WHERE u.election_id = %s
                       AND (
-                          u.ballot_serial_number !~ '[^0-9]'
-                          OR b.serial_start !~ '[^0-9]'
-                          OR b.serial_end !~ '[^0-9]'
+                          u.ballot_serial_number ~ '[^0-9]'
+                          OR b.serial_start ~ '[^0-9]'
+                          OR b.serial_end ~ '[^0-9]'
                           OR u.ballot_serial_number::BIGINT < b.serial_start::BIGINT
                           OR u.ballot_serial_number::BIGINT > b.serial_end::BIGINT
                       )
