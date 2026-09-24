@@ -38,6 +38,10 @@ REQUIRED_COLUMNS = {
         "turnout_observation_id", "election_id", "polling_station_id",
         "observation_version", "voters_turnout", "source_document_id",
     },
+    "registered_voter_observations": {
+        "registered_voter_observation_id", "election_id", "polling_station_id",
+        "observation_version", "registered_voters", "observed_at", "source_document_id",
+    },
     "ballot_accounting_observations": {
         "ballot_accounting_observation_id", "election_id",
         "polling_station_id", "position_id", "observation_version",
@@ -58,6 +62,11 @@ REQUIRED_COLUMNS = {
         "ballot_batch_id", "election_id", "position_id",
         "ballot_specification_id", "polling_station_id", "serial_start",
         "serial_end", "quantity", "source_document_id", "allocation_status",
+    },
+    "ballot_units": {
+        "ballot_unit_id", "election_id", "polling_station_id", "position_id",
+        "ballot_batch_id", "ballot_serial_number", "counterfoil_serial_number",
+        "status", "source_document_id", "source_reference",
     },
     "ballot_security_observations": {
         "ballot_security_observation_id", "election_id", "polling_station_id",
@@ -173,7 +182,9 @@ def main() -> int:
                     ("ballot_accounting_observations", "SELECT COUNT(*) AS n FROM ballot_accounting_observations WHERE election_id = %s"),
                     ("ballot_specifications", "SELECT COUNT(*) AS n FROM ballot_specifications WHERE election_id = %s"),
                     ("ballot_security_features", "SELECT COUNT(*) AS n FROM ballot_security_features WHERE ballot_specification_id IN (SELECT ballot_specification_id FROM ballot_specifications WHERE election_id = %s)"),
+                    ("registered_voter_observations", "SELECT COUNT(*) AS n FROM registered_voter_observations WHERE election_id = %s"),
                     ("ballot_stock_batches", "SELECT COUNT(*) AS n FROM ballot_stock_batches WHERE election_id = %s"),
+                    ("ballot_units", "SELECT COUNT(*) AS n FROM ballot_units WHERE election_id = %s"),
                     ("ballot_security_observations", "SELECT COUNT(*) AS n FROM ballot_security_observations WHERE election_id = %s"),
                     ("result_submissions", "SELECT COUNT(*) AS n FROM result_submissions WHERE election_id = %s"),
                     ("published_aggregate_totals", "SELECT COUNT(*) AS n FROM published_aggregate_totals WHERE election_id = %s"),
@@ -181,6 +192,364 @@ def main() -> int:
                 for label, sql in checks:
                     row = cur.execute(sql, (args.election_id,) if "%s" in sql else ()).fetchone()
                     print(f"{label:35} {row['n']}")
+
+                serial_mismatch = cur.execute("""
+                    SELECT COUNT(*) AS n FROM ballot_units
+                    WHERE election_id=%s AND ballot_serial_number<>counterfoil_serial_number
+                """,(args.election_id,)).fetchone()["n"]
+                if serial_mismatch:
+                    failures.append(f"Ballot/counterfoil serial mismatches: {serial_mismatch}")
+
+                serial_outside = cur.execute("""
+                    SELECT COUNT(*) AS n
+                    FROM ballot_units u
+                    JOIN ballot_stock_batches b ON b.ballot_batch_id=u.ballot_batch_id
+                    WHERE u.election_id=%s
+                      AND (
+                          u.ballot_serial_number !~ '^[0-9]+
+                    SELECT COUNT(*) AS n
+                    FROM polling_stations
+                    WHERE election_id = %s
+                      AND (turnout_reporting_interval_minutes < 1
+                           OR turnout_reporting_interval_minutes > 1440)
+                """, (args.election_id,)).fetchone()["n"]
+                if interval_invalid:
+                    failures.append(f"Invalid polling-station turnout intervals: {interval_invalid}")
+
+                interval_violations = cur.execute("""
+                    WITH ordered AS (
+                        SELECT ps.polling_station_id,
+                               ps.turnout_reporting_interval_minutes,
+                               t.observed_at,
+                               LAG(t.observed_at) OVER (
+                                   PARTITION BY t.election_id,t.polling_station_id
+                                   ORDER BY t.observed_at,t.observation_version
+                               ) previous_observed_at
+                        FROM polling_stations ps
+                        JOIN turnout_observations t
+                          ON t.election_id=ps.election_id
+                         AND t.polling_station_id=ps.polling_station_id
+                        WHERE ps.election_id=%s
+                    )
+                    SELECT COUNT(*) AS n
+                    FROM ordered
+                    WHERE previous_observed_at IS NOT NULL
+                      AND observed_at < previous_observed_at
+                            + (turnout_reporting_interval_minutes * INTERVAL '1 minute')
+                """, (args.election_id,)).fetchone()["n"]
+                if interval_violations:
+                    failures.append(f"Turnout reporting interval violations: {interval_violations}")
+
+                orphan = cur.execute(
+                    """
+                    SELECT COUNT(*) AS n
+                    FROM result_submissions rs
+                    LEFT JOIN candidates c
+                      ON c.candidate_id = rs.candidate_id
+                     AND c.election_id = rs.election_id
+                    WHERE rs.election_id = %s
+                      AND (rs.position_id IS NULL OR c.position_id IS DISTINCT FROM rs.position_id)
+                    """,
+                    (args.election_id,),
+                ).fetchone()["n"]
+                if orphan:
+                    failures.append(f"Result position mismatch rows: {orphan}")
+
+                security_specs = cur.execute("""
+                    SELECT COUNT(*)::INTEGER n FROM ballot_specifications WHERE election_id=%s
+                """,(args.election_id,)).fetchone()["n"]
+                position_count = cur.execute("SELECT COUNT(*)::INTEGER n FROM positions").fetchone()["n"]
+                if security_specs != position_count:
+                    failures.append(f"Ballot specifications: expected {position_count}, found {security_specs}")
+
+                incomplete_batches = cur.execute("""
+                    SELECT COUNT(*)::INTEGER n
+                    FROM ballot_stock_batches b
+                    WHERE b.election_id=%s
+                      AND (
+                          b.quantity <= 0
+                          OR b.serial_start !~ '^[0-9]+$'
+                          OR b.serial_end !~ '^[0-9]+$'
+                          OR b.quantity <> (b.serial_end::BIGINT - b.serial_start::BIGINT + 1)
+                      )
+                """,(args.election_id,)).fetchone()["n"]
+                if incomplete_batches:
+                    failures.append(f"Invalid ballot stock ranges: {incomplete_batches}")
+
+                security_orphans = cur.execute("""
+                    SELECT COUNT(*)::INTEGER n
+                    FROM ballot_security_observations o
+                    LEFT JOIN ballot_specifications s ON s.ballot_specification_id=o.ballot_specification_id
+                    LEFT JOIN ballot_stock_batches b ON b.ballot_batch_id=o.ballot_batch_id
+                    WHERE o.election_id=%s
+                      AND (s.election_id IS DISTINCT FROM o.election_id OR b.ballot_batch_id IS NULL)
+                """,(args.election_id,)).fetchone()["n"]
+                if security_orphans:
+                    failures.append(f"Ballot security orphan observations: {security_orphans}")
+
+                invalid_hash = cur.execute("""
+                    SELECT COUNT(*) AS n
+                    FROM result_submissions
+                    WHERE election_id = %s
+                      AND submission_hash IS NULL
+                """,(args.election_id,)).fetchone()["n"]
+                if invalid_hash:
+                    failures.append(f"Result submissions without hashes: {invalid_hash}")
+
+                print("-" * 72)
+                if failures:
+                    print("CONSISTENCY FAILED")
+                    for failure in failures:
+                        print(f" - {failure}")
+                    return 1
+
+                print("SCHEMA CONTRACT: PASS")
+                print("POSITION RELATIONSHIPS: PASS")
+                print("RESULT/CANDIDATE POSITION ALIGNMENT: PASS")
+                print("RESULT SUBMISSION HASH PRESENCE: PASS")
+                print("BALLOT/COUNTERFOIL SERIAL CONTRACT: PASS")
+                print("BALLOT SERIAL RANGE CONTRACT: PASS")
+                print("CONSISTENCY: PASS")
+                return 0
+
+    except Exception as exc:
+        print(f"CONSISTENCY CHECK FAILED: {exc}")
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
+                          OR b.serial_start !~ '^[0-9]+
+                    SELECT COUNT(*) AS n
+                    FROM polling_stations
+                    WHERE election_id = %s
+                      AND (turnout_reporting_interval_minutes < 1
+                           OR turnout_reporting_interval_minutes > 1440)
+                """, (args.election_id,)).fetchone()["n"]
+                if interval_invalid:
+                    failures.append(f"Invalid polling-station turnout intervals: {interval_invalid}")
+
+                interval_violations = cur.execute("""
+                    WITH ordered AS (
+                        SELECT ps.polling_station_id,
+                               ps.turnout_reporting_interval_minutes,
+                               t.observed_at,
+                               LAG(t.observed_at) OVER (
+                                   PARTITION BY t.election_id,t.polling_station_id
+                                   ORDER BY t.observed_at,t.observation_version
+                               ) previous_observed_at
+                        FROM polling_stations ps
+                        JOIN turnout_observations t
+                          ON t.election_id=ps.election_id
+                         AND t.polling_station_id=ps.polling_station_id
+                        WHERE ps.election_id=%s
+                    )
+                    SELECT COUNT(*) AS n
+                    FROM ordered
+                    WHERE previous_observed_at IS NOT NULL
+                      AND observed_at < previous_observed_at
+                            + (turnout_reporting_interval_minutes * INTERVAL '1 minute')
+                """, (args.election_id,)).fetchone()["n"]
+                if interval_violations:
+                    failures.append(f"Turnout reporting interval violations: {interval_violations}")
+
+                orphan = cur.execute(
+                    """
+                    SELECT COUNT(*) AS n
+                    FROM result_submissions rs
+                    LEFT JOIN candidates c
+                      ON c.candidate_id = rs.candidate_id
+                     AND c.election_id = rs.election_id
+                    WHERE rs.election_id = %s
+                      AND (rs.position_id IS NULL OR c.position_id IS DISTINCT FROM rs.position_id)
+                    """,
+                    (args.election_id,),
+                ).fetchone()["n"]
+                if orphan:
+                    failures.append(f"Result position mismatch rows: {orphan}")
+
+                security_specs = cur.execute("""
+                    SELECT COUNT(*)::INTEGER n FROM ballot_specifications WHERE election_id=%s
+                """,(args.election_id,)).fetchone()["n"]
+                position_count = cur.execute("SELECT COUNT(*)::INTEGER n FROM positions").fetchone()["n"]
+                if security_specs != position_count:
+                    failures.append(f"Ballot specifications: expected {position_count}, found {security_specs}")
+
+                incomplete_batches = cur.execute("""
+                    SELECT COUNT(*)::INTEGER n
+                    FROM ballot_stock_batches b
+                    WHERE b.election_id=%s
+                      AND (
+                          b.quantity <= 0
+                          OR b.serial_start !~ '^[0-9]+$'
+                          OR b.serial_end !~ '^[0-9]+$'
+                          OR b.quantity <> (b.serial_end::BIGINT - b.serial_start::BIGINT + 1)
+                      )
+                """,(args.election_id,)).fetchone()["n"]
+                if incomplete_batches:
+                    failures.append(f"Invalid ballot stock ranges: {incomplete_batches}")
+
+                security_orphans = cur.execute("""
+                    SELECT COUNT(*)::INTEGER n
+                    FROM ballot_security_observations o
+                    LEFT JOIN ballot_specifications s ON s.ballot_specification_id=o.ballot_specification_id
+                    LEFT JOIN ballot_stock_batches b ON b.ballot_batch_id=o.ballot_batch_id
+                    WHERE o.election_id=%s
+                      AND (s.election_id IS DISTINCT FROM o.election_id OR b.ballot_batch_id IS NULL)
+                """,(args.election_id,)).fetchone()["n"]
+                if security_orphans:
+                    failures.append(f"Ballot security orphan observations: {security_orphans}")
+
+                invalid_hash = cur.execute("""
+                    SELECT COUNT(*) AS n
+                    FROM result_submissions
+                    WHERE election_id = %s
+                      AND submission_hash IS NULL
+                """,(args.election_id,)).fetchone()["n"]
+                if invalid_hash:
+                    failures.append(f"Result submissions without hashes: {invalid_hash}")
+
+                print("-" * 72)
+                if failures:
+                    print("CONSISTENCY FAILED")
+                    for failure in failures:
+                        print(f" - {failure}")
+                    return 1
+
+                print("SCHEMA CONTRACT: PASS")
+                print("POSITION RELATIONSHIPS: PASS")
+                print("RESULT/CANDIDATE POSITION ALIGNMENT: PASS")
+                print("RESULT SUBMISSION HASH PRESENCE: PASS")
+                print("CONSISTENCY: PASS")
+                return 0
+
+    except Exception as exc:
+        print(f"CONSISTENCY CHECK FAILED: {exc}")
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
+                          OR b.serial_end !~ '^[0-9]+
+                    SELECT COUNT(*) AS n
+                    FROM polling_stations
+                    WHERE election_id = %s
+                      AND (turnout_reporting_interval_minutes < 1
+                           OR turnout_reporting_interval_minutes > 1440)
+                """, (args.election_id,)).fetchone()["n"]
+                if interval_invalid:
+                    failures.append(f"Invalid polling-station turnout intervals: {interval_invalid}")
+
+                interval_violations = cur.execute("""
+                    WITH ordered AS (
+                        SELECT ps.polling_station_id,
+                               ps.turnout_reporting_interval_minutes,
+                               t.observed_at,
+                               LAG(t.observed_at) OVER (
+                                   PARTITION BY t.election_id,t.polling_station_id
+                                   ORDER BY t.observed_at,t.observation_version
+                               ) previous_observed_at
+                        FROM polling_stations ps
+                        JOIN turnout_observations t
+                          ON t.election_id=ps.election_id
+                         AND t.polling_station_id=ps.polling_station_id
+                        WHERE ps.election_id=%s
+                    )
+                    SELECT COUNT(*) AS n
+                    FROM ordered
+                    WHERE previous_observed_at IS NOT NULL
+                      AND observed_at < previous_observed_at
+                            + (turnout_reporting_interval_minutes * INTERVAL '1 minute')
+                """, (args.election_id,)).fetchone()["n"]
+                if interval_violations:
+                    failures.append(f"Turnout reporting interval violations: {interval_violations}")
+
+                orphan = cur.execute(
+                    """
+                    SELECT COUNT(*) AS n
+                    FROM result_submissions rs
+                    LEFT JOIN candidates c
+                      ON c.candidate_id = rs.candidate_id
+                     AND c.election_id = rs.election_id
+                    WHERE rs.election_id = %s
+                      AND (rs.position_id IS NULL OR c.position_id IS DISTINCT FROM rs.position_id)
+                    """,
+                    (args.election_id,),
+                ).fetchone()["n"]
+                if orphan:
+                    failures.append(f"Result position mismatch rows: {orphan}")
+
+                security_specs = cur.execute("""
+                    SELECT COUNT(*)::INTEGER n FROM ballot_specifications WHERE election_id=%s
+                """,(args.election_id,)).fetchone()["n"]
+                position_count = cur.execute("SELECT COUNT(*)::INTEGER n FROM positions").fetchone()["n"]
+                if security_specs != position_count:
+                    failures.append(f"Ballot specifications: expected {position_count}, found {security_specs}")
+
+                incomplete_batches = cur.execute("""
+                    SELECT COUNT(*)::INTEGER n
+                    FROM ballot_stock_batches b
+                    WHERE b.election_id=%s
+                      AND (
+                          b.quantity <= 0
+                          OR b.serial_start !~ '^[0-9]+$'
+                          OR b.serial_end !~ '^[0-9]+$'
+                          OR b.quantity <> (b.serial_end::BIGINT - b.serial_start::BIGINT + 1)
+                      )
+                """,(args.election_id,)).fetchone()["n"]
+                if incomplete_batches:
+                    failures.append(f"Invalid ballot stock ranges: {incomplete_batches}")
+
+                security_orphans = cur.execute("""
+                    SELECT COUNT(*)::INTEGER n
+                    FROM ballot_security_observations o
+                    LEFT JOIN ballot_specifications s ON s.ballot_specification_id=o.ballot_specification_id
+                    LEFT JOIN ballot_stock_batches b ON b.ballot_batch_id=o.ballot_batch_id
+                    WHERE o.election_id=%s
+                      AND (s.election_id IS DISTINCT FROM o.election_id OR b.ballot_batch_id IS NULL)
+                """,(args.election_id,)).fetchone()["n"]
+                if security_orphans:
+                    failures.append(f"Ballot security orphan observations: {security_orphans}")
+
+                invalid_hash = cur.execute("""
+                    SELECT COUNT(*) AS n
+                    FROM result_submissions
+                    WHERE election_id = %s
+                      AND submission_hash IS NULL
+                """,(args.election_id,)).fetchone()["n"]
+                if invalid_hash:
+                    failures.append(f"Result submissions without hashes: {invalid_hash}")
+
+                print("-" * 72)
+                if failures:
+                    print("CONSISTENCY FAILED")
+                    for failure in failures:
+                        print(f" - {failure}")
+                    return 1
+
+                print("SCHEMA CONTRACT: PASS")
+                print("POSITION RELATIONSHIPS: PASS")
+                print("RESULT/CANDIDATE POSITION ALIGNMENT: PASS")
+                print("RESULT SUBMISSION HASH PRESENCE: PASS")
+                print("CONSISTENCY: PASS")
+                return 0
+
+    except Exception as exc:
+        print(f"CONSISTENCY CHECK FAILED: {exc}")
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
+                          OR u.ballot_serial_number::BIGINT < b.serial_start::BIGINT
+                          OR u.ballot_serial_number::BIGINT > b.serial_end::BIGINT
+                      )
+                """,(args.election_id,)).fetchone()["n"]
+                if serial_outside:
+                    failures.append(f"Serialized ballots outside allocated stock ranges: {serial_outside}")
 
                 interval_invalid = cur.execute("""
                     SELECT COUNT(*) AS n
