@@ -194,21 +194,22 @@ def main() -> int:
                     print(f"{label:35} {row['n']}")
 
                 serial_mismatch = cur.execute("""
-                    SELECT COUNT(*) AS n FROM ballot_units
-                    WHERE election_id=%s AND ballot_serial_number<>counterfoil_serial_number
-                """,(args.election_id,)).fetchone()["n"]
+                    SELECT COUNT(*) AS n
+                    FROM ballot_units
+                    WHERE election_id = %s
+                      AND ballot_serial_number <> counterfoil_serial_number
+                """, (args.election_id,)).fetchone()["n"]
                 if serial_mismatch:
                     failures.append(f"Ballot/counterfoil serial mismatches: {serial_mismatch}")
 
                 serial_outside = cur.execute("""
                     SELECT COUNT(*) AS n
                     FROM ballot_units u
-                    JOIN ballot_stock_batches b ON b.ballot_batch_id=u.ballot_batch_id
-                    WHERE u.election_id=%s
+                    JOIN ballot_stock_batches b
+                      ON b.ballot_batch_id = u.ballot_batch_id
+                    WHERE u.election_id = %s
                       AND (
                           u.ballot_serial_number !~ '^[0-9]+
-                    SELECT COUNT(*) AS n
-                    FROM polling_stations
                     WHERE election_id = %s
                       AND (turnout_reporting_interval_minutes < 1
                            OR turnout_reporting_interval_minutes > 1440)
@@ -321,8 +322,6 @@ if __name__ == "__main__":
     raise SystemExit(main())
 
                           OR b.serial_start !~ '^[0-9]+
-                    SELECT COUNT(*) AS n
-                    FROM polling_stations
                     WHERE election_id = %s
                       AND (turnout_reporting_interval_minutes < 1
                            OR turnout_reporting_interval_minutes > 1440)
@@ -433,8 +432,6 @@ if __name__ == "__main__":
     raise SystemExit(main())
 
                           OR b.serial_end !~ '^[0-9]+
-                    SELECT COUNT(*) AS n
-                    FROM polling_stations
                     WHERE election_id = %s
                       AND (turnout_reporting_interval_minutes < 1
                            OR turnout_reporting_interval_minutes > 1440)
@@ -547,7 +544,7 @@ if __name__ == "__main__":
                           OR u.ballot_serial_number::BIGINT < b.serial_start::BIGINT
                           OR u.ballot_serial_number::BIGINT > b.serial_end::BIGINT
                       )
-                """,(args.election_id,)).fetchone()["n"]
+                """, (args.election_id,)).fetchone()["n"]
                 if serial_outside:
                     failures.append(f"Serialized ballots outside allocated stock ranges: {serial_outside}")
 
