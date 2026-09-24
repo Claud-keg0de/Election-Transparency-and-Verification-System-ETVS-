@@ -38,6 +38,10 @@ REQUIRED_COLUMNS = {
         "turnout_observation_id", "election_id", "polling_station_id",
         "observation_version", "voters_turnout", "source_document_id",
     },
+    "registered_voter_observations": {
+        "registered_voter_observation_id", "election_id", "polling_station_id",
+        "observation_version", "registered_voters", "observed_at", "source_document_id",
+    },
     "ballot_accounting_observations": {
         "ballot_accounting_observation_id", "election_id",
         "polling_station_id", "position_id", "observation_version",
@@ -58,6 +62,11 @@ REQUIRED_COLUMNS = {
         "ballot_batch_id", "election_id", "position_id",
         "ballot_specification_id", "polling_station_id", "serial_start",
         "serial_end", "quantity", "source_document_id", "allocation_status",
+    },
+    "ballot_units": {
+        "ballot_unit_id", "election_id", "polling_station_id", "position_id",
+        "ballot_batch_id", "ballot_serial_number", "counterfoil_serial_number",
+        "status", "source_document_id", "source_reference",
     },
     "ballot_security_observations": {
         "ballot_security_observation_id", "election_id", "polling_station_id",
@@ -89,6 +98,9 @@ REQUIRED_FKS = {
     "fk_ballot_security_observation_station_election",
     "fk_ballot_security_observation_specification",
     "fk_ballot_security_observation_batch",
+    "fk_ballot_unit_station_election",
+    "fk_ballot_unit_position",
+    "fk_ballot_unit_batch_context",
 }
 
 
@@ -173,7 +185,9 @@ def main() -> int:
                     ("ballot_accounting_observations", "SELECT COUNT(*) AS n FROM ballot_accounting_observations WHERE election_id = %s"),
                     ("ballot_specifications", "SELECT COUNT(*) AS n FROM ballot_specifications WHERE election_id = %s"),
                     ("ballot_security_features", "SELECT COUNT(*) AS n FROM ballot_security_features WHERE ballot_specification_id IN (SELECT ballot_specification_id FROM ballot_specifications WHERE election_id = %s)"),
+                    ("registered_voter_observations", "SELECT COUNT(*) AS n FROM registered_voter_observations WHERE election_id = %s"),
                     ("ballot_stock_batches", "SELECT COUNT(*) AS n FROM ballot_stock_batches WHERE election_id = %s"),
+                    ("ballot_units", "SELECT COUNT(*) AS n FROM ballot_units WHERE election_id = %s"),
                     ("ballot_security_observations", "SELECT COUNT(*) AS n FROM ballot_security_observations WHERE election_id = %s"),
                     ("result_submissions", "SELECT COUNT(*) AS n FROM result_submissions WHERE election_id = %s"),
                     ("published_aggregate_totals", "SELECT COUNT(*) AS n FROM published_aggregate_totals WHERE election_id = %s"),
@@ -181,6 +195,31 @@ def main() -> int:
                 for label, sql in checks:
                     row = cur.execute(sql, (args.election_id,) if "%s" in sql else ()).fetchone()
                     print(f"{label:35} {row['n']}")
+
+                serial_mismatch = cur.execute("""
+                    SELECT COUNT(*) AS n
+                    FROM ballot_units
+                    WHERE election_id = %s
+                      AND ballot_serial_number <> counterfoil_serial_number
+                """, (args.election_id,)).fetchone()["n"]
+                if serial_mismatch:
+                    failures.append(f"Ballot/counterfoil serial mismatches: {serial_mismatch}")
+
+                serial_outside = cur.execute("""
+                    SELECT COUNT(*) AS n
+                    FROM ballot_units u
+                    JOIN ballot_stock_batches b ON b.ballot_batch_id = u.ballot_batch_id
+                    WHERE u.election_id = %s
+                      AND (
+                          u.ballot_serial_number ~ '[^0-9]'
+                          OR b.serial_start ~ '[^0-9]'
+                          OR b.serial_end ~ '[^0-9]'
+                          OR u.ballot_serial_number::BIGINT < b.serial_start::BIGINT
+                          OR u.ballot_serial_number::BIGINT > b.serial_end::BIGINT
+                      )
+                """, (args.election_id,)).fetchone()["n"]
+                if serial_outside:
+                    failures.append(f"Serialized ballots outside allocated stock ranges: {serial_outside}")
 
                 interval_invalid = cur.execute("""
                     SELECT COUNT(*) AS n
@@ -230,6 +269,15 @@ def main() -> int:
                 ).fetchone()["n"]
                 if orphan:
                     failures.append(f"Result position mismatch rows: {orphan}")
+
+                batch_context_constraint = cur.execute("""
+                    SELECT COUNT(*) AS n
+                    FROM information_schema.table_constraints
+                    WHERE table_schema='public'
+                      AND constraint_name='unique_ballot_batch_context'
+                """).fetchone()["n"]
+                if not batch_context_constraint:
+                    failures.append("Missing ballot-unit batch-context constraint")
 
                 security_specs = cur.execute("""
                     SELECT COUNT(*)::INTEGER n FROM ballot_specifications WHERE election_id=%s
@@ -283,6 +331,8 @@ def main() -> int:
                 print("POSITION RELATIONSHIPS: PASS")
                 print("RESULT/CANDIDATE POSITION ALIGNMENT: PASS")
                 print("RESULT SUBMISSION HASH PRESENCE: PASS")
+                print("BALLOT/COUNTERFOIL SERIAL CONTRACT: PASS")
+                print("BALLOT SERIAL RANGE CONTRACT: PASS")
                 print("CONSISTENCY: PASS")
                 return 0
 

@@ -348,6 +348,7 @@ def reset_sample(cur) -> None:
         "DELETE FROM result_submissions WHERE election_id=%s",
         "DELETE FROM published_aggregate_totals WHERE election_id=%s",
         "DELETE FROM ballot_security_observations WHERE election_id=%s",
+        "DELETE FROM ballot_units WHERE election_id=%s",
         "DELETE FROM ballot_stock_batches WHERE election_id=%s",
         "DELETE FROM ballot_security_features WHERE ballot_specification_id IN (SELECT ballot_specification_id FROM ballot_specifications WHERE election_id=%s)",
         "DELETE FROM ballot_specifications WHERE election_id=%s",
@@ -445,6 +446,36 @@ def seed_ballot_security(cur, ballot_source_document_id:int) -> None:
             """,(
                 ELECTION_ID,pid,spec_id,s.station_id,str(start),str(end),
                 s.registered,ballot_source_document_id
+            ))
+
+        # Anonymous ballot units retain ballot/counterfoil serial accountability
+        # without storing voter identity or candidate choice.
+        batch=cur.execute("""
+            SELECT ballot_batch_id FROM ballot_stock_batches
+            WHERE election_id=%s AND position_id=%s AND polling_station_id=%s
+        """,(ELECTION_ID,pid,s.station_id)).fetchone()
+        if batch is None:
+            raise AssertionError(f"Missing ballot stock batch for {ELECTION_ID}/{pid}/{s.station_id}")
+        for unit_index in range(min(s.turnout, 5)):
+            unit_serial = str(start + unit_index)
+            cur.execute("""
+                INSERT INTO ballot_units(
+                    election_id,polling_station_id,position_id,ballot_batch_id,
+                    ballot_serial_number,counterfoil_serial_number,status,
+                    source_document_id,source_reference
+                )
+                VALUES(%s,%s,%s,%s,%s,%s,'CAST',%s,%s)
+                ON CONFLICT(election_id,position_id,ballot_serial_number) DO UPDATE SET
+                    polling_station_id=EXCLUDED.polling_station_id,
+                    ballot_batch_id=EXCLUDED.ballot_batch_id,
+                    counterfoil_serial_number=EXCLUDED.counterfoil_serial_number,
+                    status=EXCLUDED.status,
+                    source_document_id=EXCLUDED.source_document_id,
+                    source_reference=EXCLUDED.source_reference
+            """,(
+                ELECTION_ID,s.station_id,pid,batch["ballot_batch_id"],
+                unit_serial,unit_serial,ballot_source_document_id,
+                f"SEED-BALLOT-UNIT-{s.station_id}-{pid}-{unit_serial}"
             ))
 
         # One PASS observation per required feature at every station, attached to
