@@ -70,19 +70,27 @@ jobs:
         run: |
           set -euo pipefail
           psql postgresql://postgres:postgres@localhost:5432/etvs -v ON_ERROR_STOP=1 <<'SQL'
-          INSERT INTO turnout_observations (
-            election_id, polling_station_id, observation_version,
-            voters_turnout, source_reference, observed_at
+          WITH inserted AS (
+            INSERT INTO turnout_observations (
+              election_id, polling_station_id, observation_version,
+              voters_turnout, source_reference, observed_at
+            )
+            SELECT election_id, polling_station_id,
+                   MAX(observation_version) + 1,
+                   MAX(voters_turnout),
+                   'CI-INTERVAL-TEST',
+                   MAX(observed_at) + INTERVAL '1 minute'
+            FROM turnout_observations
+            WHERE election_id='KE-PRES-2027'
+              AND polling_station_id='PS001'
+            GROUP BY election_id, polling_station_id
+            RETURNING turnout_observation_id
           )
-          SELECT election_id, polling_station_id,
-                 MAX(observation_version) + 1,
-                 MAX(voters_turnout),
-                 'CI-INTERVAL-TEST',
-                 MAX(observed_at) + INTERVAL '1 minute'
-          FROM turnout_observations
-          WHERE election_id='KE-PRES-2027'
-            AND polling_station_id='PS001'
-          GROUP BY election_id, polling_station_id;
+          UPDATE ballot_accounting_observations b
+          SET turnout_observation_id = inserted.turnout_observation_id
+          FROM inserted
+          WHERE b.election_id='KE-PRES-2027'
+            AND b.polling_station_id='PS001';
           SQL
           python audit_engine.py KE-PRES-2027 | tee /tmp/etvs-interval-audit.txt
           grep -q "R021 FAILED" /tmp/etvs-interval-audit.txt
