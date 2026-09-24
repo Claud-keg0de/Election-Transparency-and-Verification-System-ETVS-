@@ -497,7 +497,7 @@ def ballot_security_findings(cur,election_id:str,station_ids:set[str],position_i
     rows=cur.execute("""
         SELECT ps.polling_station_id,p.position_id,p.position_name,
                bs.ballot_specification_id,bs.colour_name,bs.colour_code,
-               b.ballot_batch_id,b.serial_start,b.serial_end,b.quantity,b.position_id batch_position
+               b.ballot_batch_id,b.serial_start,b.serial_end,b.quantity,b.position_id batch_position,b.ballot_specification_id batch_specification
         FROM polling_stations ps
         CROSS JOIN positions p
         LEFT JOIN ballot_specifications bs
@@ -576,13 +576,27 @@ def ballot_security_findings(cur,election_id:str,station_ids:set[str],position_i
               AND o.ballot_specification_id=%s AND f.feature_type='SERIALIZATION'
               AND o.serial_number IS NOT NULL
         """,(election_id,s,r["ballot_specification_id"])).fetchall()
+        unit_rows=cur.execute("""
+            SELECT u.ballot_serial_number,u.counterfoil_serial_number,b.serial_start,b.serial_end
+            FROM ballot_units u
+            JOIN ballot_stock_batches b ON b.ballot_batch_id=u.ballot_batch_id
+            WHERE u.election_id=%s AND u.polling_station_id=%s AND u.position_id=%s
+        """,(election_id,s,pid)).fetchall()
         serial_ok=True
         for x in serials:
             try: serial_ok &= int(x["serial_start"]) <= int(x["serial_number"]) <= int(x["serial_end"])
             except (TypeError,ValueError): serial_ok=False
-        out.append(Finding("R018",PASSED if serial_ok and bool(serials) else FAILED,
-            f"{s} {pid}: observed serialization is {'within' if serial_ok and serials else 'not within'} the allocated stock range.",
-            len(serials),1,s,None,"POLLING_STATION",s,pid,"Valid Serial Observations","Required"))
+        unit_bad=0
+        for x in unit_rows:
+            if x["ballot_serial_number"] != x["counterfoil_serial_number"]:
+                unit_bad += 1
+                continue
+            try: serial_ok &= int(x["serial_start"]) <= int(x["ballot_serial_number"]) <= int(x["serial_end"])
+            except (TypeError,ValueError): serial_ok=False; unit_bad += 1
+        evidence_count=len(serials)+len(unit_rows)
+        out.append(Finding("R018",PASSED if serial_ok and evidence_count>0 and unit_bad==0 else FAILED,
+            f"{s} {pid}: observed serialized ballots are {'within' if serial_ok and evidence_count>0 and unit_bad==0 else 'not within'} allocated stock ranges and counterfoils {'match' if unit_bad==0 else 'do not match'}.",
+            evidence_count-unit_bad,evidence_count,s,None,"POLLING_STATION",s,pid,"Valid Serialized Evidence","Observed Serialized Evidence"))
 
         dup=cur.execute("""
             SELECT COUNT(*)::INTEGER n FROM (
@@ -593,14 +607,25 @@ def ballot_security_findings(cur,election_id:str,station_ids:set[str],position_i
                 GROUP BY serial_number HAVING COUNT(*)>1
             ) d
         """,(election_id,r["ballot_specification_id"])).fetchone()["n"]
+        unit_dup=cur.execute("""
+            SELECT COUNT(*)::INTEGER n FROM (
+                SELECT ballot_serial_number
+                FROM ballot_units
+                WHERE election_id=%s AND position_id=%s
+                GROUP BY ballot_serial_number HAVING COUNT(*)>1
+            ) d
+        """,(election_id,pid)).fetchone()["n"]
+        dup += unit_dup
         out.append(Finding("R019",PASSED if dup==0 else FAILED,
-            f"{s} {pid}: {dup} duplicated serial number group(s) found for this contest.",
+            f"{s} {pid}: {dup} duplicated serialized-ballot group(s) found for this contest.",
             dup,0,s,None,"POLLING_STATION",s,pid,"Duplicate Serial Groups","Expected Zero"))
 
         batch_position_ok=r["batch_position"] in (None,pid)
-        out.append(Finding("R020",PASSED if batch_position_ok else FAILED,
-            f"{s} {pid}: ballot stock batch {'matches' if batch_position_ok else 'does not match'} the contest specification.",
-            1 if batch_position_ok else 0,1,s,None,"POLLING_STATION",s,pid,"Batch Contest Match","Required"))
+        batch_spec_ok=r["ballot_batch_id"] is not None and r["batch_specification"]==r["ballot_specification_id"]
+        r020_ok=batch_position_ok and batch_spec_ok
+        out.append(Finding("R020",PASSED if r020_ok else FAILED,
+            f"{s} {pid}: ballot stock batch {'matches' if r020_ok else 'does not match'} the contest specification.",
+            1 if r020_ok else 0,1,s,None,"POLLING_STATION",s,pid,"Batch Specification Match","Required"))
 
     return out
 
