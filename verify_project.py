@@ -98,6 +98,9 @@ REQUIRED_FKS = {
     "fk_ballot_security_observation_station_election",
     "fk_ballot_security_observation_specification",
     "fk_ballot_security_observation_batch",
+    "fk_ballot_unit_station_election",
+    "fk_ballot_unit_position",
+    "fk_ballot_unit_batch_context",
 }
 
 
@@ -266,6 +269,15 @@ def main() -> int:
                 ).fetchone()["n"]
                 if orphan:
                     failures.append(f"Result position mismatch rows: {orphan}")
+
+                batch_context_constraint = cur.execute("""
+                    SELECT COUNT(*) AS n
+                    FROM information_schema.table_constraints
+                    WHERE table_schema='public'
+                      AND constraint_name='unique_ballot_batch_context'
+                """).fetchone()["n"]
+                if not batch_context_constraint:
+                    failures.append("Missing ballot-unit batch-context constraint")
 
                 security_specs = cur.execute("""
                     SELECT COUNT(*)::INTEGER n FROM ballot_specifications WHERE election_id=%s
