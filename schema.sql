@@ -901,6 +901,11 @@ CREATE TABLE ballot_security_observations (
     CONSTRAINT ballot_security_observation_serial_check
         CHECK (
             security_feature_id IS NULL
+            OR security_feature_id IN (
+                SELECT security_feature_id
+                FROM ballot_security_features
+                WHERE feature_type <> 'SERIALIZATION'
+            )
             OR serial_number IS NOT NULL
             OR observed_status IN ('NOT_VERIFIED', 'NOT_PRESENT')
         )
