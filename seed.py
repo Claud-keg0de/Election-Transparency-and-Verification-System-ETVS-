@@ -450,6 +450,12 @@ def seed_ballot_security(cur, ballot_source_document_id:int) -> None:
 
         # Anonymous ballot units retain ballot/counterfoil serial accountability
         # without storing voter identity or candidate choice.
+        batch=cur.execute("""
+            SELECT ballot_batch_id FROM ballot_stock_batches
+            WHERE election_id=%s AND position_id=%s AND polling_station_id=%s
+        """,(ELECTION_ID,pid,s.station_id)).fetchone()
+        if batch is None:
+            raise AssertionError(f"Missing ballot stock batch for {ELECTION_ID}/{pid}/{s.station_id}")
         for unit_index in range(min(s.turnout, 5)):
             unit_serial = str(start + unit_index)
             cur.execute("""
