@@ -42,22 +42,22 @@ jobs:
         run: python -m pip install --upgrade pip "psycopg[binary]"
 
       - name: Validate Python syntax
-        run: python -m py_compile seed.py audit_engine.py verify_project.py
+        run: python -m py_compile database/seed/seed.py app/audit_engine.py tools/verify_project.py tools/verify_schema_v2.py
 
       - name: Create PostgreSQL schema
-        run: psql postgresql://postgres:postgres@localhost:5432/etvs -v ON_ERROR_STOP=1 -f schema.sql
+        run: psql postgresql://postgres:postgres@localhost:5432/etvs -v ON_ERROR_STOP=1 -f database/schema/schema.sql
 
       - name: Seed controlled ETVS dataset
-        run: python seed.py --reset
+        run: python database/seed/seed.py --reset
 
       - name: Verify project contract
-        run: python verify_project.py KE-PRES-2027
+        run: python tools/verify_project.py KE-PRES-2027
 
       - name: Run full audit
-        run: python audit_engine.py KE-PRES-2027
+        run: python app/audit_engine.py KE-PRES-2027
 
       - name: Verify audit hash chain
-        run: python audit_engine.py KE-PRES-2027 --verify-chain
+        run: python app/audit_engine.py KE-PRES-2027 --verify-chain
 
       - name: Exercise turnout interval enforcement
         shell: bash
@@ -78,8 +78,8 @@ jobs:
             AND polling_station_id='PS001'
           GROUP BY election_id, polling_station_id;
           SQL
-          python audit_engine.py KE-PRES-2027 | tee /tmp/etvs-audit.txt
+          python app/audit_engine.py KE-PRES-2027 | tee /tmp/etvs-audit.txt
           grep -q "R014 FAILED" /tmp/etvs-audit.txt
 
       - name: Verify hash chain after interval violation test
-        run: python audit_engine.py KE-PRES-2027 --verify-chain
+        run: python app/audit_engine.py KE-PRES-2027 --verify-chain

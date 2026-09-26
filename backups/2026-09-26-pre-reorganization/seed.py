@@ -114,6 +114,18 @@ def ensure_schema(cur) -> None:
             election_level TEXT NOT NULL, geography_level TEXT NOT NULL
         )
     """)
+    cur.execute("ALTER TABLE ballot_accounting_observations DROP CONSTRAINT IF EXISTS unique_ballot_observation_version")
+    cur.execute("""ALTER TABLE ballot_accounting_observations ADD CONSTRAINT unique_ballot_observation_version UNIQUE (election_id,polling_station_id,position_id,observation_version)""")
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS election_positions (
+            election_id TEXT NOT NULL REFERENCES elections(election_id),
+            position_id TEXT NOT NULL REFERENCES positions(position_id),
+            display_order SMALLINT NOT NULL CHECK (display_order > 0),
+            enabled BOOLEAN NOT NULL DEFAULT TRUE,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (election_id, position_id)
+        )
+    """)
     for table in ("turnout_observations", "ballot_accounting_observations", "result_submissions"):
         cur.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS source_document_id BIGINT")
         cur.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS observed_at TIMESTAMPTZ")
@@ -263,6 +275,18 @@ def reset_sample(cur) -> None:
         cur.execute(f"DELETE FROM {table} WHERE {column}=ANY(%s)",(values,))
     cur.execute("DELETE FROM source_documents WHERE source_id IN (%s,%s)",(SOURCE_ID,PUBLISHED_SOURCE_ID))
     cur.execute("DELETE FROM sources WHERE source_id IN (%s,%s)",(SOURCE_ID,PUBLISHED_SOURCE_ID))
+
+
+def seed_election_positions(cur) -> None:
+    """Declare which contests apply to this election; do not hard-code six rows."""
+    for pid, _, _, _, _, display_order in POSITIONS:
+        cur.execute("""
+            INSERT INTO election_positions(election_id,position_id,display_order,enabled)
+            VALUES(%s,%s,%s,TRUE)
+            ON CONFLICT(election_id,position_id) DO UPDATE SET
+                display_order=EXCLUDED.display_order,
+                enabled=EXCLUDED.enabled
+        """,(ELECTION_ID,pid,display_order))
 
 
 def seed_master_data(cur) -> None:
@@ -483,7 +507,7 @@ def main()->int:
             with conn.cursor() as cur:
                 ensure_schema(cur)
                 if a.reset:reset_sample(cur)
-                seed_positions(cur);source_doc,published_doc=seed_sources(cur);seed_master_data(cur);seed_security_features(cur);seed_observations(cur,source_doc);seed_results(cur,source_doc);seed_published_aggregates(cur,published_doc);ensure_reporting_views(cur);check(cur)
+                seed_positions(cur);source_doc,published_doc=seed_sources(cur);seed_master_data(cur);seed_election_positions(cur);seed_security_features(cur);seed_observations(cur,source_doc);seed_results(cur,source_doc);seed_published_aggregates(cur,published_doc);ensure_reporting_views(cur);check(cur)
             conn.commit()
         print("\nSEED SUCCESS: PostgreSQL data committed successfully.");return 0
     except Exception as exc:print(f"\nSEED FAILED: {exc}");return 1

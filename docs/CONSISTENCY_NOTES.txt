@@ -1,0 +1,78 @@
+ETVS CONSISTENCY-FIXED PROJECT
+==============================
+
+Active files
+------------
+
+database/schema/schema.sql
+    Canonical PostgreSQL base schema.
+
+database/seed/seed.py
+    Idempotent PostgreSQL seed. It can migrate the existing database
+    additively: creates missing provenance/position tables, adds missing
+    position_id columns, backfills result positions from candidates, creates
+    the position foreign keys, and seeds deterministic test data.
+
+app/audit_engine.py
+    PostgreSQL audit engine. Reads source observations and writes audit output.
+    Fixes:
+      - indentation error
+      - PostgreSQL NULL parameter typing
+      - position-aware result queries
+      - candidate-scoped R004 semantics
+      - transaction handling
+      - serialized audit hash-chain writers
+
+tools/verify_project.py
+    Read-only database consistency checker.
+
+tools/verify_schema_v2.py
+    Read-only verifier for the schema-v2 contract.
+
+Known errors eliminated
+-----------------------
+
+1. column lr.position_id does not exist
+   Cause: result_submissions in the live database lacked position_id while
+   audit_engine.py and the new schema expected it.
+   Fix: schema defines it; seed.py migrates/backfills it and adds FK.
+
+2. IndentationError in audit_engine.py
+   Cause: ensure_submissions_validated used inconsistent indentation.
+   Fix: normalized to four-space indentation.
+
+3. could not determine data type of parameter $2
+   Cause: PostgreSQL could not infer the type of a NULL parameter in a
+   position/candidate filter.
+   Fix: explicit ::text and ::text[] casts.
+
+4. Audit hash chain INVALID at an old finding
+   Cause: prior audit rows may have been produced by earlier hash logic.
+   Fix: current engine uses one canonical hash payload and serializes writers.
+   For a clean development verification, reset the sample election audit
+   records, run one fresh audit, then verify the chain.
+
+5. Repeated reset can fail on provenance dependencies
+   Fix: seed.py removes source-submission validation rows and source
+   submissions before deleting their source documents.
+
+Run order
+---------
+
+1. python database/seed/seed.py --reset
+2. python tools/verify_project.py
+3. python app/audit_engine.py
+4. python app/audit_engine.py --verify-chain
+
+Important
+---------
+
+Do not manually add position_id to only one table. The schema, seed and audit
+engine must be updated together.
+
+The seed deliberately includes anomalies so a successful audit should report
+both PASS and FAIL findings. The audit engine does not modify source
+observations.
+
+The historical pre-reorganization copies are stored under:
+backups/2026-09-26-pre-reorganization/
