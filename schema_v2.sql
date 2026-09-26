@@ -611,6 +611,18 @@ BEGIN
         RAISE EXCEPTION 'Artifact election does not match elector election';
     END IF;
 
+    IF NOT EXISTS (
+        SELECT 1
+        FROM public.election_positions ep
+        WHERE ep.election_id = NEW.election_id
+          AND ep.position_id = NEW.position_id
+          AND ep.enabled
+    ) THEN
+        RAISE EXCEPTION
+            'Position % is not enabled for election %',
+            NEW.position_id, NEW.election_id;
+    END IF;
+
     RETURN NEW;
 END;
 $$;
