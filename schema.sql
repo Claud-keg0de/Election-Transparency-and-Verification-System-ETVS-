@@ -95,7 +95,7 @@ Source observations
    Audit Findings
         |
         v
-   SHA-256 Hash Chain
+   BLAKE3-256 Hash Chain
 
 ===============================================================================
 */
@@ -147,6 +147,8 @@ CREATE TABLE source_documents (
 
     content_hash TEXT NOT NULL,
 
+    hash_algorithm TEXT NOT NULL DEFAULT 'BLAKE3-256',
+
     retrieved_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
 
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -156,6 +158,8 @@ CREATE TABLE source_documents (
         REFERENCES sources(source_id)
         ON UPDATE CASCADE
         ON DELETE RESTRICT,
+
+    CONSTRAINT source_document_hash_algorithm_check CHECK (hash_algorithm = 'BLAKE3-256'),
 
     CONSTRAINT source_document_hash_format
         CHECK (content_hash ~ '^[0-9a-f]{64}$'),
@@ -193,6 +197,29 @@ CREATE TABLE elections (
 
 /*
 ===============================================================================
+2. ETVS OPERATIONAL REGIONS
+===============================================================================
+*/
+
+CREATE TABLE etvs_regions (
+    region_id TEXT PRIMARY KEY,
+    region_name TEXT NOT NULL UNIQUE,
+    classification_type TEXT NOT NULL DEFAULT 'ETVS_OPERATIONAL',
+    classification_note TEXT NOT NULL
+);
+
+INSERT INTO etvs_regions(region_id,region_name,classification_note) VALUES
+('REG-01','Coastal Region','Project-level six-region classification; not a constitutional county hierarchy.'),
+('REG-02','South Eastern Region','Project-level six-region classification; not a constitutional county hierarchy.'),
+('REG-03','Mt Kenya Region','Project-level six-region classification; not a constitutional county hierarchy.'),
+('REG-04','Northern Region','Project-level six-region classification; not a constitutional county hierarchy.'),
+('REG-05','North Rift Valley Region','Project-level six-region classification; not a constitutional county hierarchy.'),
+('REG-06','Western Region','Project-level six-region classification; not a constitutional county hierarchy.')
+ON CONFLICT(region_id) DO NOTHING;
+
+
+/*
+===============================================================================
 2. COUNTIES
 ===============================================================================
 */
@@ -201,6 +228,8 @@ CREATE TABLE counties (
     county_id TEXT PRIMARY KEY,
 
     county_name TEXT NOT NULL UNIQUE,
+
+    region_id TEXT,
 
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -220,6 +249,10 @@ CREATE TABLE constituencies (
     county_id TEXT NOT NULL,
 
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT fk_county_region
+        FOREIGN KEY (region_id) REFERENCES etvs_regions(region_id)
+        ON UPDATE CASCADE ON DELETE RESTRICT,
 
     CONSTRAINT fk_constituency_county
         FOREIGN KEY (county_id)
@@ -481,6 +514,8 @@ CREATE TABLE source_submissions (
     received_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT source_submission_level_check
         CHECK (submission_level IN ('NATIONAL', 'COUNTY', 'CONSTITUENCY', 'WARD', 'POLLING_STATION')),
+    CONSTRAINT source_submission_hash_algorithm_check CHECK (hash_algorithm = 'BLAKE3-256'),
+
     CONSTRAINT source_submission_hash_check
         CHECK (submission_hash ~ '^[0-9a-f]{64}$'),
     CONSTRAINT unique_source_submission
@@ -1221,6 +1256,8 @@ CREATE TABLE result_submissions (
     CONSTRAINT result_votes_non_negative
         CHECK (votes >= 0),
 
+    CONSTRAINT result_submission_hash_algorithm_check CHECK (hash_algorithm = 'BLAKE3-256'),
+
     CONSTRAINT result_submission_hash_format
         CHECK (submission_hash IS NULL OR submission_hash ~ '^[0-9a-f]{64}$'),
 
@@ -1443,6 +1480,8 @@ CREATE TABLE audit_findings (
             comparison_value IS NULL
             OR comparison_value >= 0
         ),
+
+    CONSTRAINT audit_findings_hash_algorithm_check CHECK (hash_algorithm = 'BLAKE3-256'),
 
     CONSTRAINT current_hash_format
         CHECK (
@@ -1715,3 +1754,22 @@ END OF ETVS POSTGRESQL SCHEMA
 ===============================================================================
 */
 
+
+
+/* Current source-entry surface. Reference and derived data are not direct input. */
+CREATE TABLE etvs_input_scope (
+    input_area TEXT PRIMARY KEY,
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    description TEXT NOT NULL
+);
+
+INSERT INTO etvs_input_scope(input_area,enabled,description) VALUES
+('POLLING_STATION_DETAILS',TRUE,'Election-specific polling-station configuration and registered-voter baseline.'),
+('TURNOUT_OBSERVATION',TRUE,'Observed voters cast/turnout at a polling station; variable input.'),
+('RESULT_SUBMISSION',TRUE,'Candidate result values by polling station, contest and version.'),
+('BALLOT_ACCOUNTING',TRUE,'Contest-level ballot accounting linked to the station turnout observation.'),
+('GEOGRAPHY_REFERENCE',FALSE,'Counties, constituencies and wards are controlled reference data.'),
+('CANDIDATE_REFERENCE',FALSE,'Candidates and positions are controlled reference data.'),
+('BALLOT_SECURITY_REFERENCE',FALSE,'Ballot specifications, stock and security metadata are controlled reference data.'),
+('AUDIT_RESULTS',FALSE,'Audit findings are generated by ETVS and are not direct user input.')
+ON CONFLICT(input_area) DO NOTHING;
