@@ -10,7 +10,7 @@ Design rules:
     R007  Constituency-level published totals match derived station totals.
     R008  County-level published totals match derived station totals.
     R009  National-level published totals match derived station totals.
-    R010  Every result submission SHA-256 fingerprint is valid.
+    R010  Every result submission BLAKE3-256 fingerprint is valid.
     R011  Registered-voter observations precede turnout observations.
     R012  Turnout observation precedes contest ballot accounting.
     R013  Contest ballot accounting precedes candidate result publication.
@@ -30,7 +30,7 @@ observation. Contest-specific valid/rejected/spoilt counts are audited separatel
 from __future__ import annotations
 
 import argparse
-import hashlib
+import blake3
 import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -84,7 +84,7 @@ def now_utc() -> datetime:
 
 
 def digest(*parts: object) -> str:
-    return hashlib.sha256("|".join("" if p is None else str(p) for p in parts).encode()).hexdigest()
+    return blake3.blake3("|".join("" if p is None else str(p) for p in parts).encode()).hexdigest()
 
 
 def result_hash(election_id: str, station_id: str, candidate_id: str, version: int, votes: int) -> str:
@@ -104,6 +104,7 @@ def ensure_runtime_columns(cur) -> None:
     cur.execute("ALTER TABLE result_submissions ADD COLUMN IF NOT EXISTS source_document_id BIGINT")
     cur.execute("ALTER TABLE result_submissions ADD COLUMN IF NOT EXISTS position_id TEXT")
     cur.execute("ALTER TABLE result_submissions ADD COLUMN IF NOT EXISTS submission_hash TEXT")
+    cur.execute("ALTER TABLE result_submissions ADD COLUMN IF NOT EXISTS hash_algorithm TEXT NOT NULL DEFAULT 'BLAKE3-256'")
     cur.execute("ALTER TABLE audit_runs ADD COLUMN IF NOT EXISTS scope_level TEXT")
     cur.execute("ALTER TABLE audit_runs ADD COLUMN IF NOT EXISTS scope_id TEXT")
     cur.execute("ALTER TABLE audit_runs ADD COLUMN IF NOT EXISTS candidate_id TEXT")
@@ -112,6 +113,7 @@ def ensure_runtime_columns(cur) -> None:
     cur.execute("ALTER TABLE audit_findings ADD COLUMN IF NOT EXISTS geography_level TEXT")
     cur.execute("ALTER TABLE audit_findings ADD COLUMN IF NOT EXISTS geography_id TEXT")
     cur.execute("ALTER TABLE audit_findings ADD COLUMN IF NOT EXISTS position_id TEXT")
+    cur.execute("ALTER TABLE audit_findings ADD COLUMN IF NOT EXISTS hash_algorithm TEXT NOT NULL DEFAULT 'BLAKE3-256'")
     cur.execute("ALTER TABLE audit_findings ADD COLUMN IF NOT EXISTS actual_label TEXT NOT NULL DEFAULT 'Actual value'")
     cur.execute("ALTER TABLE audit_findings ADD COLUMN IF NOT EXISTS comparison_label TEXT NOT NULL DEFAULT 'Comparison value'")
 
