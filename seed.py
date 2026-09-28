@@ -18,7 +18,7 @@ Run:
 from __future__ import annotations
 
 import argparse
-import hashlib
+import blake3
 import os
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
@@ -117,7 +117,7 @@ def db_kwargs() -> dict:
 
 
 def digest(*parts: object) -> str:
-    return hashlib.sha256("|".join("" if p is None else str(p) for p in parts).encode()).hexdigest()
+    return blake3.blake3("|".join("" if p is None else str(p) for p in parts).encode()).hexdigest()
 
 
 def ensure_schema(cur) -> None:
@@ -147,7 +147,9 @@ def ensure_schema(cur) -> None:
     cur.execute("ALTER TABLE ballot_accounting_observations ADD COLUMN IF NOT EXISTS turnout_observation_id BIGINT")
     cur.execute("ALTER TABLE result_submissions ADD COLUMN IF NOT EXISTS position_id TEXT")
     cur.execute("ALTER TABLE result_submissions ADD COLUMN IF NOT EXISTS submission_hash TEXT")
+    cur.execute("ALTER TABLE result_submissions ADD COLUMN IF NOT EXISTS hash_algorithm TEXT NOT NULL DEFAULT 'BLAKE3-256'")
     cur.execute("ALTER TABLE result_submissions ADD COLUMN IF NOT EXISTS observed_at TIMESTAMPTZ")
+    cur.execute("ALTER TABLE source_documents ADD COLUMN IF NOT EXISTS hash_algorithm TEXT NOT NULL DEFAULT 'BLAKE3-256'")
     cur.execute("ALTER TABLE positions ADD COLUMN IF NOT EXISTS ballot_code TEXT")
     cur.execute("ALTER TABLE positions ADD COLUMN IF NOT EXISTS observation_sequence INTEGER")
     cur.execute("ALTER TABLE polling_stations ADD COLUMN IF NOT EXISTS turnout_reporting_interval_minutes INTEGER NOT NULL DEFAULT 30")
