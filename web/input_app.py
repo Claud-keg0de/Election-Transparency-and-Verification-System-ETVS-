@@ -5,6 +5,7 @@ fixture tool rather than the source-entry interface.
 """
 from __future__ import annotations
 import os
+import secrets
 from datetime import datetime, timezone
 import blake3
 import psycopg
@@ -12,6 +13,8 @@ from flask import Flask, render_template_string, request
 from psycopg.rows import dict_row
 
 app = Flask(__name__)
+app.config["SECRET_KEY"] = os.getenv("ETVS_FLASK_SECRET") or secrets.token_hex(32)
+app.jinja_env.autoescape = True
 POSITIONS=("POS-PRESIDENT","POS-GOVERNOR","POS-SENATOR","POS-WOMEN-REP","POS-MP","POS-MCA")
 
 SHELL="""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -118,7 +121,7 @@ def contest():
     with db() as c,c.cursor() as q:
         stations=q.execute("SELECT polling_station_id,polling_station_code,election_id,registered_voters FROM polling_stations ORDER BY polling_station_code").fetchall()
         positions=q.execute("""SELECT position_id,position_name FROM positions WHERE position_id=ANY(%s)
-                               ORDER BY observation_sequence NULLS LAST""",(list(POSITIONS),)).fetchall()
+                               ORDER BY position_name""",(list(POSITIONS),)).fetchall()
         sid=request.values.get("polling_station_id"); pid=request.values.get("position_id")
         candidates=[]; turnout_value=None
         if sid:
