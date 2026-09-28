@@ -72,14 +72,14 @@ DECLARE
     v_candidate_total INTEGER;
     v_result_count INTEGER;
 BEGIN
-    IF TG_TABLE_NAME = 'result_submissions' THEN
-        v_election_id := COALESCE(NEW.election_id, OLD.election_id);
-        v_station_id := COALESCE(NEW.polling_station_id, OLD.polling_station_id);
-        v_position_id := COALESCE(NEW.position_id, OLD.position_id);
+    IF TG_OP = 'DELETE' THEN
+        v_election_id := OLD.election_id;
+        v_station_id := OLD.polling_station_id;
+        v_position_id := OLD.position_id;
     ELSE
-        v_election_id := COALESCE(NEW.election_id, OLD.election_id);
-        v_station_id := COALESCE(NEW.polling_station_id, OLD.polling_station_id);
-        v_position_id := COALESCE(NEW.position_id, OLD.position_id);
+        v_election_id := NEW.election_id;
+        v_station_id := NEW.polling_station_id;
+        v_position_id := NEW.position_id;
     END IF;
 
     IF v_position_id IS NULL THEN
