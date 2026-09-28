@@ -48,7 +48,7 @@ Only these are enabled as source-entry areas:
 - candidate results
 - ballot accounting
 
-Everything else is reference data or derived output for now.
+Everything else is reference data or derived output for now. Human source entry is performed through `web/input_app.py`; `seed.py` remains a deterministic test fixture and is not the normal data-entry path.
 
 ### Turnout
 
@@ -73,3 +73,15 @@ The hexadecimal representation remains 64 characters, so the database storage sh
 BLAKE3 is a cryptographic hash function with a default 256-bit output. It is not a password-hashing/KDF algorithm; ETVS uses it for integrity/fingerprinting and tamper-evident chaining, not password storage.
 
 Install the Python dependency with the project requirements before running the seed/audit tools.
+
+
+## Form accounting contract
+
+For each polling station there is one variable turnout/votes-cast observation. Each contest then records candidate votes plus rejected and spoilt ballots.
+
+- **Turnout / votes cast** is entered once per polling station and is not calculated from registered voters.
+- **Valid votes** are calculated by ETVS as the sum of candidate votes for that contest; the user does not enter a separate valid-votes total.
+- **Turnout = valid votes + rejected ballots.**
+- **Spoilt ballots are never cast** and therefore are stored separately and excluded from turnout.
+- PostgreSQL independently enforces the contest identity with a deferred constraint trigger.
+- BLAKE3-256 fingerprints are generated server-side for turnout and ballot-accounting submissions, while result submissions retain their BLAKE3 fingerprint.
