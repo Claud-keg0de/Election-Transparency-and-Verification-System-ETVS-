@@ -1,205 +1,60 @@
-/*
-===============================================================================
-ETVS - ELECTRONIC TRANSPARENCY & VERIFICATION SYSTEM
-HARDENED POSTGRESQL DATABASE SCHEMA
-===============================================================================
+-- ETVS authoritative PostgreSQL schema
+-- PostgreSQL 18 compatible.
+-- Source observations are immutable evidence; audit outputs are separate.
+-- Normal source entry: polling-station details, turnout, contest results,
+-- and contest ballot accounting. Geography/positions/candidates/security
+-- reference data are controlled data.
+--
+-- Accounting contract:
+--   valid_votes = SUM(latest candidate votes for a contest)
+--   voters_turnout = valid_votes + rejected_votes
+--   spoilt_ballots are separate and NEVER count as voters cast.
+--
+-- Cryptographic contract:
+--   BLAKE3-256, represented as 64 lowercase hexadecimal characters.
 
-PURPOSE
--------
-This schema creates the PostgreSQL database for the ETVS independent election
-verification and auditing system.
+BEGIN;
 
-CORE DESIGN PRINCIPLES
-----------------------
-
-1. Source election observations are stored separately from audit results.
-
-2. The audit engine READS source observations.
-
-3. The audit engine DOES NOT modify source observations.
-
-4. Audit results are stored separately in audit_runs and audit_findings.
-
-5. Audit findings use meaningful actual/comparison labels instead of generic value names.
-
-6. PostgreSQL constraints protect source-data integrity.
-
-7. TIMESTAMPTZ is used for timestamps.
-
-8. Election counts use INTEGER because voters, ballots and votes are whole
-   numbers.
-
-9. Real ETVS identifiers use readable TEXT identifiers.
-
-10. Generated database record IDs use PostgreSQL identity columns.
-
-11. Registration centres represent relatively stable registration locations.
-
-12. Polling stations represent election-specific use of registration centres.
-
-13. Registered-voter counts are stored at the election/polling-station level
-    so historical election values are preserved.
-
-14. Composite foreign keys enforce consistency between an election and the
-    polling station or candidate associated with a record.
-
-15. The audit engine produces findings without changing source evidence.
-
-===============================================================================
-
-
-DATABASE HIERARCHY
-------------------
-
-County
-   |
-   +-- Constituency
-          |
-          +-- Ward
-                 |
-                 +-- Registration Centre
-                        |
-                        +-- Election-specific Polling Station
-                               |
-                               +-- Turnout Observation
-                               |
-                               +-- Ballot Accounting Observation
-                               |
-                               +-- Result Submission
-                                      |
-                                      +-- Candidate
-
-Election provides the temporal context for polling stations, candidates,
-observations and results.
-
-
-AUDIT FLOW
-----------
-
-Source observations
-        |
-        v
-   Audit Engine
-        |
-        +--> Rule 1: Turnout <= Registered Voters
-        |
-        +--> Rule 2: Candidate Votes <= Turnout
-        |
-        +--> Rule 3: Ballot Accounting
-        |
-        +--> Rule 4: Aggregate Consistency
-        |
-        +--> Rule 5: Submission/Version Checks
-        |
-        v
-   Audit Findings
-        |
-        v
-   BLAKE3-256 Hash Chain
-
-===============================================================================
-*/
-
-
-/*
-===============================================================================
-0. SOURCE PROVENANCE
-===============================================================================
-
-Sources identify the organization or publication that supplied election data.
-Source documents identify the specific file or record package retrieved from a
-source. Observation tables retain source_reference for backwards compatibility,
-while source_document_id provides a structured provenance link.
-===============================================================================
-*/
+-- ---------------------------------------------------------------------------
+-- Provenance
+-- ---------------------------------------------------------------------------
 
 CREATE TABLE sources (
     source_id TEXT PRIMARY KEY,
-
     source_name TEXT NOT NULL,
-
-    source_type TEXT NOT NULL,
-
+    source_type TEXT NOT NULL CHECK (source_type IN ('OFFICIAL','MEDIA','CIVIL_SOCIETY','OTHER')),
     organization_name TEXT,
-
     description TEXT,
-
     source_url TEXT,
-
-    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    CONSTRAINT sources_type_check
-        CHECK (source_type IN ('OFFICIAL', 'MEDIA', 'CIVIL_SOCIETY', 'OTHER'))
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
-
 
 CREATE TABLE source_documents (
-    document_id BIGINT
-        GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-
-    source_id TEXT NOT NULL,
-
+    document_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    source_id TEXT NOT NULL REFERENCES sources(source_id) ON UPDATE CASCADE ON DELETE RESTRICT,
     document_name TEXT NOT NULL,
-
     document_type TEXT NOT NULL,
-
     document_uri TEXT,
-
     content_hash TEXT NOT NULL,
-
     hash_algorithm TEXT NOT NULL DEFAULT 'BLAKE3-256',
-
     retrieved_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    CONSTRAINT fk_source_document_source
-        FOREIGN KEY (source_id)
-        REFERENCES sources(source_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT source_document_hash_algorithm_check CHECK (hash_algorithm = 'BLAKE3-256'),
-
-    CONSTRAINT source_document_hash_format
-        CHECK (content_hash ~ '^[0-9a-f]{64}$'),
-
-    CONSTRAINT unique_source_document
-        UNIQUE (source_id, document_name, content_hash)
+    CONSTRAINT source_documents_hash_algorithm_check CHECK (hash_algorithm='BLAKE3-256'),
+    CONSTRAINT source_documents_hash_format CHECK (content_hash ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT unique_source_document UNIQUE(source_id,document_name,content_hash)
 );
 
-
-CREATE INDEX idx_source_documents_source
-    ON source_documents(source_id);
-
-
-/*
-===============================================================================
-1. ELECTIONS
-===============================================================================
-*/
+-- ---------------------------------------------------------------------------
+-- Election and six-region project geography
+-- ---------------------------------------------------------------------------
 
 CREATE TABLE elections (
     election_id TEXT PRIMARY KEY,
-
     election_name TEXT NOT NULL,
-
     election_date DATE NOT NULL,
-
-    status TEXT NOT NULL DEFAULT 'ACTIVE',
-
-    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    CONSTRAINT elections_status_check
-        CHECK (status IN ('ACTIVE', 'CLOSED', 'ARCHIVED'))
+    status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE','CLOSED','ARCHIVED')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
-
-
-/*
-===============================================================================
-2. ETVS OPERATIONAL REGIONS
-===============================================================================
-*/
 
 CREATE TABLE etvs_regions (
     region_id TEXT PRIMARY KEY,
@@ -214,1287 +69,433 @@ INSERT INTO etvs_regions(region_id,region_name,classification_note) VALUES
 ('REG-03','Mt Kenya Region','Project-level six-region classification; not a constitutional county hierarchy.'),
 ('REG-04','Northern Region','Project-level six-region classification; not a constitutional county hierarchy.'),
 ('REG-05','North Rift Valley Region','Project-level six-region classification; not a constitutional county hierarchy.'),
-('REG-06','Western Region','Project-level six-region classification; not a constitutional county hierarchy.')
-ON CONFLICT(region_id) DO NOTHING;
-
-
-/*
-===============================================================================
-2. COUNTIES
-===============================================================================
-*/
+('REG-06','Western Region','Project-level six-region classification; not a constitutional county hierarchy.');
 
 CREATE TABLE counties (
     county_id TEXT PRIMARY KEY,
-
     county_name TEXT NOT NULL UNIQUE,
-
-    region_id TEXT,
-
+    region_id TEXT NOT NULL REFERENCES etvs_regions(region_id) ON UPDATE CASCADE ON DELETE RESTRICT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-
-/*
-===============================================================================
-3. CONSTITUENCIES
-===============================================================================
-*/
-
 CREATE TABLE constituencies (
     constituency_id TEXT PRIMARY KEY,
-
     constituency_name TEXT NOT NULL,
-
-    county_id TEXT NOT NULL,
-
+    county_id TEXT NOT NULL REFERENCES counties(county_id) ON UPDATE CASCADE ON DELETE RESTRICT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    CONSTRAINT fk_constituency_county
-        FOREIGN KEY (county_id)
-        REFERENCES counties(county_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT unique_constituency_name_per_county
-        UNIQUE (county_id, constituency_name)
+    CONSTRAINT unique_constituency_name_per_county UNIQUE(county_id,constituency_name)
 );
-
-
-/*
-===============================================================================
-4. WARDS
-===============================================================================
-*/
 
 CREATE TABLE wards (
     ward_id TEXT PRIMARY KEY,
-
     ward_name TEXT NOT NULL,
-
-    constituency_id TEXT NOT NULL,
-
+    constituency_id TEXT NOT NULL REFERENCES constituencies(constituency_id) ON UPDATE CASCADE ON DELETE RESTRICT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    CONSTRAINT fk_ward_constituency
-        FOREIGN KEY (constituency_id)
-        REFERENCES constituencies(constituency_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT unique_ward_name_per_constituency
-        UNIQUE (constituency_id, ward_name)
+    CONSTRAINT unique_ward_name_per_constituency UNIQUE(constituency_id,ward_name)
 );
-
-
-/*
-===============================================================================
-5. REGISTRATION CENTRES
-===============================================================================
-
-A registration centre represents the relatively stable administrative or
-physical location associated with voter registration.
-
-IMPORTANT
----------
-
-The registration centre does NOT store an election-specific registered-voter
-count.
-
-The same registration centre may participate in multiple elections, and its
-registered-voter population can change between elections.
-
-Example:
-
-    RC001
-    Juja Primary School
-    Ward W001
-
-    2022 -> used for polling
-    2027 -> used for polling
-    2032 -> used for polling
-
-Historical voter counts therefore belong to the election-specific polling
-station record.
-
-A registration centre may also contain multiple polling stations during one
-election if the electoral configuration requires it.
-===============================================================================
-*/
 
 CREATE TABLE registration_centres (
     registration_centre_id TEXT PRIMARY KEY,
-
     registration_centre_name TEXT NOT NULL,
-
-    ward_id TEXT NOT NULL,
-
+    ward_id TEXT NOT NULL REFERENCES wards(ward_id) ON UPDATE CASCADE ON DELETE RESTRICT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    CONSTRAINT fk_registration_centre_ward
-        FOREIGN KEY (ward_id)
-        REFERENCES wards(ward_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT unique_registration_centre_name_per_ward
-        UNIQUE (ward_id, registration_centre_name)
+    CONSTRAINT unique_registration_centre_name_per_ward UNIQUE(ward_id,registration_centre_name)
 );
-
-
-/*
-===============================================================================
-6. POLLING STATIONS
-===============================================================================
-
-A polling station represents the election-specific use/assignment of a
-registration centre.
-
-RELATIONSHIP
-------------
-
-Registration Centre
-        |
-        +-- Election 2027
-        |      |
-        |      +-- PS001
-        |      +-- PS002
-        |
-        +-- Election 2032
-               |
-               +-- PS001
-
-The polling station stores registered_voters because this value belongs to
-the specific election configuration.
-
-This preserves historical voter-registration figures.
-
-IMPORTANT
----------
-
-polling_station_id is globally unique within ETVS.
-
-The pair:
-
-    (polling_station_id, election_id)
-
-is also declared UNIQUE so that other tables can enforce election/station
-consistency through composite foreign keys.
-===============================================================================
-*/
 
 CREATE TABLE polling_stations (
     polling_station_id TEXT PRIMARY KEY,
-
-    election_id TEXT NOT NULL,
-
-    registration_centre_id TEXT NOT NULL,
-
+    election_id TEXT NOT NULL REFERENCES elections(election_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+    registration_centre_id TEXT NOT NULL REFERENCES registration_centres(registration_centre_id) ON UPDATE CASCADE ON DELETE RESTRICT,
     polling_station_code TEXT NOT NULL,
-
-    registered_voters INTEGER NOT NULL,
-
-    -- Minimum elapsed time permitted between successive turnout observations.
-    -- This is an ETVS audit/data-collection policy, not an IEBC universal rule.
-    turnout_reporting_interval_minutes INTEGER NOT NULL DEFAULT 30,
-
-    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    CONSTRAINT fk_polling_station_election
-        FOREIGN KEY (election_id)
-        REFERENCES elections(election_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT fk_polling_station_registration_centre
-        FOREIGN KEY (registration_centre_id)
-        REFERENCES registration_centres(registration_centre_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT polling_station_registered_voters_non_negative
-        CHECK (registered_voters >= 0),
-
-    CONSTRAINT polling_station_turnout_interval_positive
+    registered_voters INTEGER NOT NULL CHECK (registered_voters >= 0),
+    turnout_reporting_interval_minutes INTEGER NOT NULL DEFAULT 30
         CHECK (turnout_reporting_interval_minutes BETWEEN 1 AND 1440),
-
-    CONSTRAINT unique_polling_station_code_per_election
-        UNIQUE (election_id, polling_station_code),
-
-    CONSTRAINT unique_polling_station_election_pair
-        UNIQUE (polling_station_id, election_id)
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT unique_polling_station_code_per_election UNIQUE(election_id,polling_station_code),
+    CONSTRAINT unique_polling_station_election_pair UNIQUE(polling_station_id,election_id)
 );
 
-
-/*
-===============================================================================
-7. CANDIDATES
-===============================================================================
-
-Candidates belong to a particular election.
-
-candidate_id identifies the ETVS candidate record.
-
-The pair:
-
-    (candidate_id, election_id)
-
-is declared UNIQUE so result submissions can enforce that the candidate belongs
-to the same election as the submitted result.
-===============================================================================
-*/
+-- ---------------------------------------------------------------------------
+-- Positions and candidates
+-- ---------------------------------------------------------------------------
 
 CREATE TABLE positions (
     position_id TEXT PRIMARY KEY,
-
     position_name TEXT NOT NULL UNIQUE,
-
-    election_level TEXT NOT NULL,
-
-    geography_level TEXT NOT NULL,
-
-    CONSTRAINT position_election_level_check
-        CHECK (election_level IN ('PRESIDENT', 'GOVERNOR', 'SENATOR',
-                                  'WOMEN_REP', 'MP', 'MCA')),
-
-    CONSTRAINT position_geography_level_check
-        CHECK (geography_level IN ('NATIONAL', 'COUNTY', 'CONSTITUENCY', 'WARD'))
+    election_level TEXT NOT NULL CHECK (election_level IN ('PRESIDENT','GOVERNOR','SENATOR','WOMEN_REP','MP','MCA')),
+    geography_level TEXT NOT NULL CHECK (geography_level IN ('NATIONAL','COUNTY','CONSTITUENCY','WARD')),
+    ballot_code TEXT,
+    observation_sequence INTEGER,
+    CONSTRAINT positions_observation_sequence_unique UNIQUE(observation_sequence)
 );
 
 CREATE TABLE candidates (
     candidate_id TEXT PRIMARY KEY,
-
-    election_id TEXT NOT NULL,
-
+    election_id TEXT NOT NULL REFERENCES elections(election_id) ON UPDATE CASCADE ON DELETE RESTRICT,
     candidate_name TEXT NOT NULL,
-
     office TEXT NOT NULL,
-
     position_id TEXT,
-
+    party_affiliation_type TEXT,
+    party_id TEXT,
+    symbol_type TEXT,
+    symbol_reference TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    CONSTRAINT fk_candidate_election
-        FOREIGN KEY (election_id)
-        REFERENCES elections(election_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT fk_candidate_position
-        FOREIGN KEY (position_id)
-        REFERENCES positions(position_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT unique_candidate_per_election
-        UNIQUE (election_id, candidate_name, office),
-
-    CONSTRAINT unique_candidate_election_pair
-        UNIQUE (candidate_id, election_id)
+    CONSTRAINT fk_candidate_position FOREIGN KEY(position_id) REFERENCES positions(position_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+    CONSTRAINT unique_candidate_per_election UNIQUE(election_id,candidate_name,office),
+    CONSTRAINT unique_candidate_election_pair UNIQUE(candidate_id,election_id),
+    CONSTRAINT candidate_party_symbol_check CHECK (
+        party_affiliation_type IS NULL OR party_affiliation_type IN ('PARTY','INDEPENDENT')
+    ),
+    CONSTRAINT candidate_symbol_type_check CHECK (
+        symbol_type IS NULL OR symbol_type IN ('PARTY','INDEPENDENT')
+    ),
+    CONSTRAINT candidate_independent_party_check CHECK (
+        party_affiliation_type <> 'INDEPENDENT' OR party_id IS NULL
+    )
 );
 
+-- ---------------------------------------------------------------------------
+-- Published/source submission layers
+-- ---------------------------------------------------------------------------
 
 CREATE TABLE source_submissions (
     source_submission_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    election_id TEXT NOT NULL REFERENCES elections(election_id)
-        ON UPDATE CASCADE ON DELETE RESTRICT,
-    source_document_id BIGINT NOT NULL REFERENCES source_documents(document_id)
-        ON UPDATE CASCADE ON DELETE RESTRICT,
-    position_id TEXT REFERENCES positions(position_id)
-        ON UPDATE CASCADE ON DELETE RESTRICT,
-    submission_level TEXT NOT NULL,
+    election_id TEXT NOT NULL REFERENCES elections(election_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+    source_document_id BIGINT NOT NULL REFERENCES source_documents(document_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+    position_id TEXT,
+    submission_level TEXT NOT NULL CHECK (submission_level IN ('NATIONAL','COUNTY','CONSTITUENCY','WARD','POLLING_STATION')),
     geography_id TEXT NOT NULL,
     candidate_id TEXT,
     payload JSONB NOT NULL,
     submission_hash TEXT NOT NULL,
     hash_algorithm TEXT NOT NULL DEFAULT 'BLAKE3-256',
     received_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT source_submission_level_check
-        CHECK (submission_level IN ('NATIONAL', 'COUNTY', 'CONSTITUENCY', 'WARD', 'POLLING_STATION')),
-    CONSTRAINT source_submission_hash_algorithm_check CHECK (hash_algorithm = 'BLAKE3-256'),
-
-    CONSTRAINT source_submission_hash_check
-        CHECK (submission_hash ~ '^[0-9a-f]{64}$'),
-    CONSTRAINT unique_source_submission
-        UNIQUE (election_id, source_document_id, submission_level,
-                geography_id, candidate_id, submission_hash)
+    CONSTRAINT source_submissions_hash_algorithm_check CHECK (hash_algorithm='BLAKE3-256'),
+    CONSTRAINT source_submissions_hash_format CHECK (submission_hash ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT unique_source_submission UNIQUE(election_id,source_document_id,submission_level,geography_id,candidate_id,submission_hash)
 );
-
 
 CREATE TABLE submission_validation_results (
     validation_result_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    source_submission_id BIGINT NOT NULL REFERENCES source_submissions(source_submission_id)
-        ON UPDATE CASCADE ON DELETE RESTRICT,
-    status TEXT NOT NULL,
+    source_submission_id BIGINT NOT NULL UNIQUE REFERENCES source_submissions(source_submission_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+    status TEXT NOT NULL CHECK(status IN ('VALID','INVALID')),
     error_message TEXT,
     validated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT submission_validation_status_check CHECK (status IN ('VALID', 'INVALID')),
-    CONSTRAINT validation_message_check
-        CHECK ((status = 'VALID' AND error_message IS NULL)
-            OR (status = 'INVALID' AND error_message IS NOT NULL)),
-    UNIQUE (source_submission_id)
+    CONSTRAINT validation_message_check CHECK (
+        (status='VALID' AND error_message IS NULL) OR
+        (status='INVALID' AND error_message IS NOT NULL)
+    )
 );
-
 
 CREATE TABLE published_aggregate_totals (
     published_aggregate_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    election_id TEXT NOT NULL,
-    source_document_id BIGINT NOT NULL,
-    aggregation_level TEXT NOT NULL,
+    election_id TEXT NOT NULL REFERENCES elections(election_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+    source_document_id BIGINT NOT NULL REFERENCES source_documents(document_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+    aggregation_level TEXT NOT NULL CHECK(aggregation_level IN ('NATIONAL','COUNTY','CONSTITUENCY','WARD','POLLING_STATION')),
     geography_id TEXT NOT NULL,
     candidate_id TEXT,
-
-    position_id TEXT,
+    position_id TEXT REFERENCES positions(position_id) ON UPDATE CASCADE ON DELETE RESTRICT,
     metric TEXT NOT NULL,
     reported_value INTEGER NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT fk_published_aggregate_election
-        FOREIGN KEY (election_id) REFERENCES elections(election_id)
-        ON UPDATE CASCADE ON DELETE RESTRICT,
-    CONSTRAINT fk_published_aggregate_source_document
-        FOREIGN KEY (source_document_id) REFERENCES source_documents(document_id)
-        ON UPDATE CASCADE ON DELETE RESTRICT,
-    CONSTRAINT fk_published_aggregate_candidate
-        FOREIGN KEY (candidate_id, election_id)
-        REFERENCES candidates(candidate_id, election_id)
-        ON UPDATE CASCADE ON DELETE RESTRICT,
     CONSTRAINT fk_published_aggregate_position
-        FOREIGN KEY (position_id) REFERENCES positions(position_id)
+        FOREIGN KEY(position_id) REFERENCES positions(position_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+    CONSTRAINT fk_published_aggregate_candidate
+        FOREIGN KEY(candidate_id,election_id) REFERENCES candidates(candidate_id,election_id)
         ON UPDATE CASCADE ON DELETE RESTRICT,
-    CONSTRAINT published_aggregate_level_check
-        CHECK (aggregation_level IN ('WARD', 'CONSTITUENCY', 'COUNTY', 'NATIONAL')),
-    CONSTRAINT published_aggregate_metric_check
-        CHECK (metric IN ('TURNOUT', 'CANDIDATE_VOTES')),
-    CONSTRAINT published_aggregate_candidate_check
-        CHECK ((metric = 'TURNOUT' AND candidate_id IS NULL)
-            OR (metric = 'CANDIDATE_VOTES' AND candidate_id IS NOT NULL)),
-    CONSTRAINT published_aggregate_value_non_negative CHECK (reported_value >= 0),
+    CONSTRAINT published_aggregate_metric_check CHECK (
+        (metric='CANDIDATE_VOTES' AND candidate_id IS NOT NULL) OR
+        (metric<>'CANDIDATE_VOTES')
+    ),
     CONSTRAINT unique_published_aggregate
-        UNIQUE NULLS NOT DISTINCT (election_id, source_document_id,
-                aggregation_level, geography_id, candidate_id, position_id, metric)
+        UNIQUE NULLS NOT DISTINCT(election_id,source_document_id,aggregation_level,geography_id,candidate_id,position_id,metric)
 );
 
-
-CREATE INDEX idx_published_aggregate_lookup
-    ON published_aggregate_totals(election_id, aggregation_level, geography_id);
-
-
-
-/*
-===============================================================================
-POLLING-STATION TURNOUT REPORTING INTERVAL
-===============================================================================
-
-Each polling station has its own turnout_reporting_interval_minutes setting.
-The interval is the minimum elapsed time permitted between successive turnout
-observations for that station. ETVS enforces it as audit rule R021.
-
-This is an ETVS audit/data-collection policy. It must not be presented as a
-universal IEBC reporting requirement unless an authoritative IEBC source
-establishes such a requirement.
-===============================================================================
-*/
-
-/*
-===============================================================================
-8. BALLOT SECURITY, SPECIFICATION AND STOCK CONTROL
-===============================================================================
-
-This layer models ballot-paper security independently from vote results.
-
-IMPORTANT
----------
-1. ballot_specifications describe what the authoritative election-specific
-   specification requires.
-2. ballot_security_features describe individual expected security controls.
-3. ballot_stock_batches record controlled ballot stock by serial range.
-4. ballot_security_observations record what an auditor/source actually observed.
-5. No table links a ballot serial number to a voter.
-
-The audit engine compares specification/stock expectations with observations.
-It does not modify source observations.
-===============================================================================
-*/
+-- ---------------------------------------------------------------------------
+-- Ballot specifications, stock, serialized ballot/counterfoil evidence
+-- ---------------------------------------------------------------------------
 
 CREATE TABLE ballot_specifications (
     ballot_specification_id TEXT PRIMARY KEY,
-
-    election_id TEXT NOT NULL,
-
-    position_id TEXT NOT NULL,
-
+    election_id TEXT NOT NULL REFERENCES elections(election_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+    position_id TEXT NOT NULL REFERENCES positions(position_id) ON UPDATE CASCADE ON DELETE RESTRICT,
     colour_name TEXT,
     colour_code TEXT,
-
     paper_description TEXT,
     paper_size TEXT,
     paper_finish TEXT,
-
     counterfoil_required BOOLEAN NOT NULL DEFAULT TRUE,
     official_mark_required BOOLEAN NOT NULL DEFAULT TRUE,
-
-    source_document_id BIGINT,
-
+    source_document_id BIGINT REFERENCES source_documents(document_id) ON UPDATE CASCADE ON DELETE RESTRICT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    CONSTRAINT fk_ballot_specification_election
-        FOREIGN KEY (election_id)
-        REFERENCES elections(election_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT fk_ballot_specification_position
-        FOREIGN KEY (position_id)
-        REFERENCES positions(position_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT fk_ballot_specification_source
-        FOREIGN KEY (source_document_id)
-        REFERENCES source_documents(document_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT unique_ballot_specification
-        UNIQUE (election_id, position_id)
+    CONSTRAINT unique_ballot_specification UNIQUE(election_id,position_id)
 );
-
 
 CREATE TABLE ballot_security_features (
-    security_feature_id BIGINT
-        GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-
-    ballot_specification_id TEXT NOT NULL,
-
+    security_feature_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    ballot_specification_id TEXT NOT NULL REFERENCES ballot_specifications(ballot_specification_id) ON UPDATE CASCADE ON DELETE RESTRICT,
     feature_type TEXT NOT NULL,
-
     feature_code TEXT,
-
     description TEXT NOT NULL,
-
     verification_method TEXT,
-
     required BOOLEAN NOT NULL DEFAULT TRUE,
-
-    source_document_id BIGINT,
-
+    source_document_id BIGINT REFERENCES source_documents(document_id) ON UPDATE CASCADE ON DELETE RESTRICT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    CONSTRAINT fk_ballot_security_feature_specification
-        FOREIGN KEY (ballot_specification_id)
-        REFERENCES ballot_specifications(ballot_specification_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT fk_ballot_security_feature_source
-        FOREIGN KEY (source_document_id)
-        REFERENCES source_documents(document_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT unique_ballot_security_feature_type
-        UNIQUE (ballot_specification_id, feature_type),
-
-    CONSTRAINT ballot_security_feature_type_check
-        CHECK (feature_type IN (
-            'WATERMARK',
-            'UV',
-            'ANTI_COPY',
-            'GUILLOCHE',
-            'MICROTEXT',
-            'SERIALIZATION',
-            'EMBOSSMENT',
-            'PERFORATION',
-            'OFFICIAL_MARK',
-            'PAPER'
-        ))
+    CONSTRAINT unique_ballot_security_feature UNIQUE(ballot_specification_id,feature_type),
+    CONSTRAINT ballot_security_feature_type_check CHECK (
+        feature_type IN ('WATERMARK','UV','ANTI_COPY','GUILLOCHE','MICROTEXT',
+                         'SERIALIZATION','EMBOSSMENT','PERFORATION','OFFICIAL_MARK','PAPER')
+    )
 );
-
-
-CREATE INDEX idx_ballot_security_features_spec
-    ON ballot_security_features(ballot_specification_id);
-
 
 CREATE TABLE ballot_stock_batches (
-    ballot_batch_id BIGINT
-        GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-
-    election_id TEXT NOT NULL,
-
-    position_id TEXT NOT NULL,
-
-    ballot_specification_id TEXT NOT NULL,
-
+    ballot_batch_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    election_id TEXT NOT NULL REFERENCES elections(election_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+    position_id TEXT NOT NULL REFERENCES positions(position_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+    ballot_specification_id TEXT NOT NULL REFERENCES ballot_specifications(ballot_specification_id) ON UPDATE CASCADE ON DELETE RESTRICT,
     polling_station_id TEXT,
-
     serial_start TEXT NOT NULL,
-
     serial_end TEXT NOT NULL,
-
-    quantity INTEGER NOT NULL,
-
-    source_document_id BIGINT,
-
-    allocation_status TEXT NOT NULL DEFAULT 'ALLOCATED',
-
+    quantity INTEGER NOT NULL CHECK(quantity > 0),
+    source_document_id BIGINT REFERENCES source_documents(document_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+    allocation_status TEXT NOT NULL DEFAULT 'ALLOCATED'
+        CHECK(allocation_status IN ('ALLOCATED','ISSUED','RETURNED','RECONCILED','CANCELLED')),
     notes TEXT,
-
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    CONSTRAINT fk_ballot_batch_election
-        FOREIGN KEY (election_id)
-        REFERENCES elections(election_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT fk_ballot_batch_position
-        FOREIGN KEY (position_id)
-        REFERENCES positions(position_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT fk_ballot_batch_specification
-        FOREIGN KEY (ballot_specification_id)
-        REFERENCES ballot_specifications(ballot_specification_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT fk_ballot_batch_station_election
-        FOREIGN KEY (polling_station_id, election_id)
-        REFERENCES polling_stations(polling_station_id, election_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT fk_ballot_batch_source
-        FOREIGN KEY (source_document_id)
-        REFERENCES source_documents(document_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT ballot_batch_quantity_positive
-        CHECK (quantity > 0),
-
-    CONSTRAINT ballot_batch_serials_present
-        CHECK (length(trim(serial_start)) > 0 AND length(trim(serial_end)) > 0),
-
-    CONSTRAINT unique_ballot_stock_batch
-        UNIQUE (election_id, position_id, polling_station_id, serial_start, serial_end),
-
-    CONSTRAINT ballot_batch_status_check
-        CHECK (allocation_status IN (
-            'ALLOCATED',
-            'ISSUED',
-            'RETURNED',
-            'RECONCILED',
-            'CANCELLED'
-        ))
+    CONSTRAINT fk_ballot_stock_station_election
+        FOREIGN KEY(polling_station_id,election_id)
+        REFERENCES polling_stations(polling_station_id,election_id)
+        ON UPDATE CASCADE ON DELETE RESTRICT,
+    CONSTRAINT unique_ballot_stock_range
+        UNIQUE(election_id,position_id,polling_station_id,serial_start,serial_end),
+    CONSTRAINT unique_ballot_batch_context
+        UNIQUE(ballot_batch_id,election_id,polling_station_id,position_id)
 );
-
-
-CREATE INDEX idx_ballot_stock_batches_lookup
-    ON ballot_stock_batches(election_id, position_id, polling_station_id);
-
-
-ALTER TABLE ballot_stock_batches
-    ADD CONSTRAINT unique_ballot_batch_context
-    UNIQUE (ballot_batch_id, election_id, polling_station_id, position_id);
 
 CREATE TABLE ballot_units (
     ballot_unit_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    election_id TEXT NOT NULL,
+    election_id TEXT NOT NULL REFERENCES elections(election_id) ON UPDATE CASCADE ON DELETE RESTRICT,
     polling_station_id TEXT NOT NULL,
     position_id TEXT NOT NULL,
     ballot_batch_id BIGINT NOT NULL,
     ballot_serial_number TEXT NOT NULL,
     counterfoil_serial_number TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'ALLOCATED',
+    status TEXT NOT NULL DEFAULT 'ALLOCATED'
+        CHECK(status IN ('ALLOCATED','ISSUED','CAST','COUNTED','UNUSED','REJECTED','SPOILT','CANCELLED')),
     issued_at TIMESTAMPTZ,
     cast_at TIMESTAMPTZ,
-    source_document_id BIGINT,
+    source_document_id BIGINT REFERENCES source_documents(document_id) ON UPDATE CASCADE ON DELETE RESTRICT,
     source_reference TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    CONSTRAINT fk_ballot_unit_election
-        FOREIGN KEY (election_id) REFERENCES elections(election_id)
-        ON UPDATE CASCADE ON DELETE RESTRICT,
+    CONSTRAINT fk_ballot_unit_position FOREIGN KEY(position_id) REFERENCES positions(position_id) ON UPDATE CASCADE ON DELETE RESTRICT,
     CONSTRAINT fk_ballot_unit_station_election
-        FOREIGN KEY (polling_station_id, election_id)
-        REFERENCES polling_stations(polling_station_id, election_id)
-        ON UPDATE CASCADE ON DELETE RESTRICT,
-    CONSTRAINT fk_ballot_unit_position
-        FOREIGN KEY (position_id) REFERENCES positions(position_id)
+        FOREIGN KEY(polling_station_id,election_id)
+        REFERENCES polling_stations(polling_station_id,election_id)
         ON UPDATE CASCADE ON DELETE RESTRICT,
     CONSTRAINT fk_ballot_unit_batch_context
-        FOREIGN KEY (ballot_batch_id, election_id, polling_station_id, position_id)
-        REFERENCES ballot_stock_batches(ballot_batch_id, election_id, polling_station_id, position_id)
+        FOREIGN KEY(ballot_batch_id,election_id,polling_station_id,position_id)
+        REFERENCES ballot_stock_batches(ballot_batch_id,election_id,polling_station_id,position_id)
         ON UPDATE CASCADE ON DELETE RESTRICT,
-    CONSTRAINT fk_ballot_unit_source
-        FOREIGN KEY (source_document_id) REFERENCES source_documents(document_id)
-        ON UPDATE CASCADE ON DELETE RESTRICT,
-    CONSTRAINT ballot_unit_serials_present
-        CHECK (length(trim(ballot_serial_number)) > 0 AND length(trim(counterfoil_serial_number)) > 0),
-    CONSTRAINT ballot_unit_counterfoil_match
-        CHECK (ballot_serial_number = counterfoil_serial_number),
-    CONSTRAINT ballot_unit_status_check
-        CHECK (status IN ('ALLOCATED','ISSUED','CAST','COUNTED','UNUSED','REJECTED','SPOILT','CANCELLED')),
-    CONSTRAINT unique_ballot_unit_serial
-        UNIQUE (election_id, position_id, ballot_serial_number),
-    CONSTRAINT unique_ballot_unit_counterfoil
-        UNIQUE (election_id, position_id, counterfoil_serial_number)
+    CONSTRAINT ballot_unit_serials_present CHECK (
+        length(trim(ballot_serial_number))>0 AND length(trim(counterfoil_serial_number))>0
+    ),
+    CONSTRAINT ballot_unit_counterfoil_match CHECK(ballot_serial_number=counterfoil_serial_number),
+    CONSTRAINT unique_ballot_unit_serial UNIQUE(election_id,position_id,ballot_serial_number),
+    CONSTRAINT unique_ballot_unit_counterfoil UNIQUE(election_id,position_id,counterfoil_serial_number)
 );
-
-CREATE INDEX idx_ballot_units_station_position
-    ON ballot_units(election_id, polling_station_id, position_id);
-
 
 CREATE TABLE ballot_security_observations (
-    ballot_security_observation_id BIGINT
-        GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-
-    election_id TEXT NOT NULL,
-
+    ballot_security_observation_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    election_id TEXT NOT NULL REFERENCES elections(election_id) ON UPDATE CASCADE ON DELETE RESTRICT,
     polling_station_id TEXT NOT NULL,
-
-    ballot_specification_id TEXT NOT NULL,
-
-    ballot_batch_id BIGINT,
-
-    security_feature_id BIGINT,
-
+    ballot_specification_id TEXT NOT NULL REFERENCES ballot_specifications(ballot_specification_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+    ballot_batch_id BIGINT REFERENCES ballot_stock_batches(ballot_batch_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+    security_feature_id BIGINT REFERENCES ballot_security_features(security_feature_id) ON UPDATE CASCADE ON DELETE RESTRICT,
     serial_number TEXT,
-
-    observed_status TEXT NOT NULL,
-
+    observed_status TEXT NOT NULL CHECK(observed_status IN ('PASS','FAIL','NOT_VERIFIED','NOT_PRESENT')),
     observed_value TEXT,
-
     verification_method TEXT,
-
-    source_document_id BIGINT,
-
+    source_document_id BIGINT REFERENCES source_documents(document_id) ON UPDATE CASCADE ON DELETE RESTRICT,
     source_reference TEXT,
-
     observed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    CONSTRAINT fk_ballot_security_observation_election
-        FOREIGN KEY (election_id)
-        REFERENCES elections(election_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT fk_ballot_security_observation_station
-        FOREIGN KEY (polling_station_id, election_id)
-        REFERENCES polling_stations(polling_station_id, election_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
     CONSTRAINT fk_ballot_security_observation_station_election
-        FOREIGN KEY (polling_station_id, election_id)
-        REFERENCES polling_stations(polling_station_id, election_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
+        FOREIGN KEY(polling_station_id,election_id)
+        REFERENCES polling_stations(polling_station_id,election_id)
+        ON UPDATE CASCADE ON DELETE RESTRICT,
     CONSTRAINT fk_ballot_security_observation_specification
-        FOREIGN KEY (ballot_specification_id)
+        FOREIGN KEY(ballot_specification_id)
         REFERENCES ballot_specifications(ballot_specification_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
+        ON UPDATE CASCADE ON DELETE RESTRICT,
     CONSTRAINT fk_ballot_security_observation_batch
-        FOREIGN KEY (ballot_batch_id)
+        FOREIGN KEY(ballot_batch_id)
         REFERENCES ballot_stock_batches(ballot_batch_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT fk_ballot_security_observation_feature
-        FOREIGN KEY (security_feature_id)
-        REFERENCES ballot_security_features(security_feature_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT fk_ballot_security_observation_source
-        FOREIGN KEY (source_document_id)
-        REFERENCES source_documents(document_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT unique_ballot_security_observation_reference
-        UNIQUE (source_reference),
-
-    CONSTRAINT ballot_security_observation_status_check
-        CHECK (observed_status IN (
-            'PASS',
-            'FAIL',
-            'NOT_VERIFIED',
-            'NOT_PRESENT'
-        ))
-
+        ON UPDATE CASCADE ON DELETE RESTRICT
 );
 
-
-CREATE INDEX idx_ballot_security_observations_station
-    ON ballot_security_observations(election_id, polling_station_id);
-
-CREATE INDEX idx_ballot_security_observations_serial
-    ON ballot_security_observations(election_id, ballot_specification_id, serial_number);
-
-
-/*
-===============================================================================
-9. TURNOUT OBSERVATIONS
-===============================================================================
-
-INDEPENDENT SOURCE OBSERVATION
-
-This table contains independently obtained turnout observations.
-
-The audit engine READS these records.
-
-The audit engine MUST NOT overwrite the source values.
-
-The composite foreign key ensures that the observation's election and polling
-station belong together.
-
-Example:
-
-    Election: KE-PRES-2027
-    Polling Station: PS001
-    Turnout: 800
-
-===============================================================================
-*/
+-- ---------------------------------------------------------------------------
+-- Station turnout and registered-voter evidence
+-- ---------------------------------------------------------------------------
 
 CREATE TABLE turnout_observations (
-    turnout_observation_id BIGINT
-        GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-
-    election_id TEXT NOT NULL,
-
+    turnout_observation_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    election_id TEXT NOT NULL REFERENCES elections(election_id) ON UPDATE CASCADE ON DELETE RESTRICT,
     polling_station_id TEXT NOT NULL,
-
-    observation_version INTEGER NOT NULL DEFAULT 1,
-
-    voters_turnout INTEGER NOT NULL,
-
+    observation_version INTEGER NOT NULL DEFAULT 1 CHECK(observation_version>0),
+    voters_turnout INTEGER NOT NULL CHECK(voters_turnout>=0),
     observed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    source_document_id BIGINT,
-
+    source_document_id BIGINT REFERENCES source_documents(document_id) ON UPDATE CASCADE ON DELETE RESTRICT,
     source_reference TEXT,
-
     input_hash TEXT,
     hash_algorithm TEXT NOT NULL DEFAULT 'BLAKE3-256',
-    CONSTRAINT turnout_input_hash_format CHECK (input_hash IS NULL OR input_hash ~ '^[0-9a-f]{64}
-        FOREIGN KEY (election_id)
-        REFERENCES elections(election_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
     CONSTRAINT fk_turnout_station_election
-        FOREIGN KEY (polling_station_id, election_id)
-        REFERENCES polling_stations(
-            polling_station_id,
-            election_id
-        )
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT fk_turnout_source_document
-        FOREIGN KEY (source_document_id)
-        REFERENCES source_documents(document_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT turnout_non_negative
-        CHECK (voters_turnout >= 0),
-
-    CONSTRAINT turnout_version_positive
-        CHECK (observation_version > 0),
-
+        FOREIGN KEY(polling_station_id,election_id)
+        REFERENCES polling_stations(polling_station_id,election_id)
+        ON UPDATE CASCADE ON DELETE RESTRICT,
+    CONSTRAINT turnout_input_hash_format CHECK(input_hash IS NULL OR input_hash ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT turnout_hash_algorithm_check CHECK(hash_algorithm='BLAKE3-256'),
     CONSTRAINT unique_turnout_observation_version
-        UNIQUE (
-            election_id,
-            polling_station_id,
-            observation_version
-        )
+        UNIQUE(election_id,polling_station_id,observation_version)
 );
-
 
 CREATE TABLE registered_voter_observations (
     registered_voter_observation_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    election_id TEXT NOT NULL,
+    election_id TEXT NOT NULL REFERENCES elections(election_id) ON UPDATE CASCADE ON DELETE RESTRICT,
     polling_station_id TEXT NOT NULL,
-    observation_version INTEGER NOT NULL DEFAULT 1,
-    registered_voters INTEGER NOT NULL,
+    observation_version INTEGER NOT NULL DEFAULT 1 CHECK(observation_version>0),
+    registered_voters INTEGER NOT NULL CHECK(registered_voters>=0),
     observed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    source_document_id BIGINT,
+    source_document_id BIGINT REFERENCES source_documents(document_id) ON UPDATE CASCADE ON DELETE RESTRICT,
     source_reference TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    CONSTRAINT fk_registered_voter_observation_election
-        FOREIGN KEY (election_id) REFERENCES elections(election_id)
-        ON UPDATE CASCADE ON DELETE RESTRICT,
     CONSTRAINT fk_registered_voter_observation_station_election
-        FOREIGN KEY (polling_station_id, election_id)
-        REFERENCES polling_stations(polling_station_id, election_id)
+        FOREIGN KEY(polling_station_id,election_id)
+        REFERENCES polling_stations(polling_station_id,election_id)
         ON UPDATE CASCADE ON DELETE RESTRICT,
-    CONSTRAINT fk_registered_voter_observation_source
-        FOREIGN KEY (source_document_id) REFERENCES source_documents(document_id)
-        ON UPDATE CASCADE ON DELETE RESTRICT,
-    CONSTRAINT registered_voter_observation_version_positive CHECK (observation_version > 0),
-    CONSTRAINT registered_voter_observation_non_negative CHECK (registered_voters >= 0),
     CONSTRAINT unique_registered_voter_observation_version
-        UNIQUE (election_id, polling_station_id, observation_version)
+        UNIQUE(election_id,polling_station_id,observation_version)
 );
 
-CREATE INDEX idx_registered_voter_observations_latest
-    ON registered_voter_observations(election_id, polling_station_id, observation_version DESC);
-
-
-/*
-===============================================================================
-9. BALLOT ACCOUNTING OBSERVATIONS
-===============================================================================
-
-INDEPENDENT SOURCE OBSERVATION
-
-Stores the independently observed ballot categories.
-
-The audit engine calculates:
-
-    calculated_ballots =
-        valid_votes
-        + rejected_votes
-        + spoilt_ballots
-
-The calculated value is then compared against turnout.
-
-The original source values remain unchanged.
-
-===============================================================================
-*/
+-- ---------------------------------------------------------------------------
+-- Contest accounting and candidate results
+-- ---------------------------------------------------------------------------
 
 CREATE TABLE ballot_accounting_observations (
-    ballot_accounting_observation_id BIGINT
-        GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-
-    election_id TEXT NOT NULL,
-
+    ballot_accounting_observation_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    election_id TEXT NOT NULL REFERENCES elections(election_id) ON UPDATE CASCADE ON DELETE RESTRICT,
     polling_station_id TEXT NOT NULL,
-
-    position_id TEXT,
-
-    observation_version INTEGER NOT NULL DEFAULT 1,
-
-    valid_votes INTEGER NOT NULL,
-
-    rejected_votes INTEGER NOT NULL,
-
-    spoilt_ballots INTEGER NOT NULL,
-
+    position_id TEXT NOT NULL REFERENCES positions(position_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+    observation_version INTEGER NOT NULL DEFAULT 1 CHECK(observation_version>0),
+    valid_votes INTEGER NOT NULL CHECK(valid_votes>=0),
+    rejected_votes INTEGER NOT NULL CHECK(rejected_votes>=0),
+    spoilt_ballots INTEGER NOT NULL CHECK(spoilt_ballots>=0),
     turnout_observation_id BIGINT,
-
     observed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    source_document_id BIGINT,
-
+    source_document_id BIGINT REFERENCES source_documents(document_id) ON UPDATE CASCADE ON DELETE RESTRICT,
     source_reference TEXT,
-
     input_hash TEXT,
     hash_algorithm TEXT NOT NULL DEFAULT 'BLAKE3-256',
-    CONSTRAINT ballot_input_hash_format CHECK (input_hash IS NULL OR input_hash ~ '^[0-9a-f]{64}
-        FOREIGN KEY (election_id)
-        REFERENCES elections(election_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
+    CONSTRAINT fk_ballot_position FOREIGN KEY(position_id) REFERENCES positions(position_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+    CONSTRAINT fk_ballot_turnout_observation FOREIGN KEY(turnout_observation_id) REFERENCES turnout_observations(turnout_observation_id) ON UPDATE CASCADE ON DELETE RESTRICT,
     CONSTRAINT fk_ballot_station_election
-        FOREIGN KEY (polling_station_id, election_id)
-        REFERENCES polling_stations(
-            polling_station_id,
-            election_id
-        )
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT fk_ballot_source_document
-        FOREIGN KEY (source_document_id)
-        REFERENCES source_documents(document_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT fk_ballot_position
-        FOREIGN KEY (position_id)
-        REFERENCES positions(position_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT fk_ballot_turnout_observation
-        FOREIGN KEY (turnout_observation_id)
-        REFERENCES turnout_observations(turnout_observation_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT ballot_position_not_null
-        CHECK (position_id IS NOT NULL),
-
-    CONSTRAINT valid_votes_non_negative
-        CHECK (valid_votes >= 0),
-
-    CONSTRAINT rejected_votes_non_negative
-        CHECK (rejected_votes >= 0),
-
-    CONSTRAINT spoilt_ballots_non_negative
-        CHECK (spoilt_ballots >= 0),
-
-    CONSTRAINT ballot_version_positive
-        CHECK (observation_version > 0),
-
-    CONSTRAINT unique_ballot_observation_version
-        UNIQUE (
-            election_id,
-            polling_station_id,
-            position_id,
-            observation_version
-        )
+        FOREIGN KEY(polling_station_id,election_id)
+        REFERENCES polling_stations(polling_station_id,election_id)
+        ON UPDATE CASCADE ON DELETE RESTRICT,
+    CONSTRAINT ballot_input_hash_format CHECK(input_hash IS NULL OR input_hash ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT ballot_hash_algorithm_check CHECK(hash_algorithm='BLAKE3-256'),
+    CONSTRAINT unique_ballot_accounting_position_version
+        UNIQUE(election_id,polling_station_id,position_id,observation_version)
 );
 
-
-/*
-===============================================================================
-10. RESULT SUBMISSIONS
-===============================================================================
-
-A result submission records the reported votes for one candidate at one
-polling station.
-
-Multiple versions are deliberately permitted.
-
-This allows ETVS to detect changes instead of silently overwriting earlier
-submissions.
-
-The composite foreign keys enforce:
-
-    result election
-        =
-    polling station election
-
-and:
-
-    result election
-        =
-    candidate election
-===============================================================================
-*/
-
 CREATE TABLE result_submissions (
-    result_submission_id BIGINT
-        GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-
-    election_id TEXT NOT NULL,
-
+    result_submission_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    election_id TEXT NOT NULL REFERENCES elections(election_id) ON UPDATE CASCADE ON DELETE RESTRICT,
     polling_station_id TEXT NOT NULL,
-
     candidate_id TEXT NOT NULL,
-
-    result_version INTEGER NOT NULL DEFAULT 1,
-
-    votes INTEGER NOT NULL,
-
-    position_id TEXT,
-
+    result_version INTEGER NOT NULL DEFAULT 1 CHECK(result_version>0),
+    votes INTEGER NOT NULL CHECK(votes>=0),
+    position_id TEXT REFERENCES positions(position_id) ON UPDATE CASCADE ON DELETE RESTRICT,
     submission_hash TEXT,
     hash_algorithm TEXT NOT NULL DEFAULT 'BLAKE3-256',
-
     submitted_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    source_document_id BIGINT,
-
+    source_document_id BIGINT REFERENCES source_documents(document_id) ON UPDATE CASCADE ON DELETE RESTRICT,
     source_reference TEXT,
-
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    CONSTRAINT fk_result_election
-        FOREIGN KEY (election_id)
-        REFERENCES elections(election_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
     CONSTRAINT fk_result_station_election
-        FOREIGN KEY (polling_station_id, election_id)
-        REFERENCES polling_stations(
-            polling_station_id,
-            election_id
-        )
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
+        FOREIGN KEY(polling_station_id,election_id)
+        REFERENCES polling_stations(polling_station_id,election_id)
+        ON UPDATE CASCADE ON DELETE RESTRICT,
     CONSTRAINT fk_result_candidate_election
-        FOREIGN KEY (candidate_id, election_id)
-        REFERENCES candidates(
-            candidate_id,
-            election_id
-        )
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
+        FOREIGN KEY(candidate_id,election_id)
+        REFERENCES candidates(candidate_id,election_id)
+        ON UPDATE CASCADE ON DELETE RESTRICT,
     CONSTRAINT fk_result_position
-        FOREIGN KEY (position_id)
-        REFERENCES positions(position_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT fk_result_source_document
-        FOREIGN KEY (source_document_id)
-        REFERENCES source_documents(document_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT result_votes_non_negative
-        CHECK (votes >= 0),
-
-    CONSTRAINT result_submission_hash_algorithm_check CHECK (hash_algorithm = 'BLAKE3-256'),
-
-    CONSTRAINT result_submission_hash_format
-        CHECK (submission_hash IS NULL OR submission_hash ~ '^[0-9a-f]{64}$'),
-
-    CONSTRAINT result_version_positive
-        CHECK (result_version > 0),
-
-    CONSTRAINT unique_result_version
-        UNIQUE (
-            election_id,
-            polling_station_id,
-            candidate_id,
-            result_version
-        )
+        FOREIGN KEY(position_id) REFERENCES positions(position_id)
+        ON UPDATE CASCADE ON DELETE RESTRICT,
+    CONSTRAINT result_submission_hash_algorithm_check CHECK(hash_algorithm='BLAKE3-256'),
+    CONSTRAINT result_submission_hash_format CHECK(submission_hash IS NULL OR submission_hash ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT unique_result_version UNIQUE(election_id,polling_station_id,candidate_id,result_version)
 );
 
-
-/*
-===============================================================================
-11. AUDIT RUNS
-===============================================================================
-
-Each execution of the audit engine creates one audit run.
-
-The run identifies the election being audited.
-
-Example:
-
-    audit_run_id = 1
-    election_id  = KE-PRES-2027
-    status       = COMPLETED
-
-===============================================================================
-*/
+-- ---------------------------------------------------------------------------
+-- Audit output
+-- ---------------------------------------------------------------------------
 
 CREATE TABLE audit_runs (
-    audit_run_id BIGINT
-        GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-
-    election_id TEXT NOT NULL,
-
+    audit_run_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    election_id TEXT NOT NULL REFERENCES elections(election_id) ON UPDATE CASCADE ON DELETE RESTRICT,
     started_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
     completed_at TIMESTAMPTZ,
-
-    status TEXT NOT NULL DEFAULT 'RUNNING',
-
-    findings_count INTEGER NOT NULL DEFAULT 0,
-
+    status TEXT NOT NULL DEFAULT 'RUNNING' CHECK(status IN ('RUNNING','COMPLETED','FAILED')),
+    findings_count INTEGER NOT NULL DEFAULT 0 CHECK(findings_count>=0),
     scope_level TEXT,
-
     scope_id TEXT,
-
     candidate_id TEXT,
-
     position_id TEXT,
-
-    CONSTRAINT fk_audit_run_election
-        FOREIGN KEY (election_id)
-        REFERENCES elections(election_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
+    CONSTRAINT fk_audit_run_position FOREIGN KEY(position_id) REFERENCES positions(position_id) ON UPDATE CASCADE ON DELETE RESTRICT,
     CONSTRAINT fk_audit_run_candidate
-        FOREIGN KEY (candidate_id, election_id)
-        REFERENCES candidates(candidate_id, election_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT fk_audit_run_position
-        FOREIGN KEY (position_id)
-        REFERENCES positions(position_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT audit_scope_level_check
-        CHECK (scope_level IS NULL OR scope_level IN (
-            'COUNTY', 'CONSTITUENCY', 'WARD', 'POLLING_STATION'
-        )),
-
-    CONSTRAINT audit_run_status_check
-        CHECK (
-            status IN (
-                'RUNNING',
-                'COMPLETED',
-                'FAILED'
-            )
-        ),
-
-    CONSTRAINT findings_count_non_negative
-        CHECK (findings_count >= 0),
-
-    CONSTRAINT completed_run_has_completion_time
-        CHECK (
-            status = 'RUNNING'
-            OR completed_at IS NOT NULL
-        )
+        FOREIGN KEY(candidate_id,election_id)
+        REFERENCES candidates(candidate_id,election_id)
+        ON UPDATE CASCADE ON DELETE RESTRICT,
+    CONSTRAINT audit_scope_level_check CHECK(scope_level IS NULL OR scope_level IN ('COUNTY','CONSTITUENCY','WARD','POLLING_STATION')),
+    CONSTRAINT completed_run_has_completion_time CHECK(status='RUNNING' OR completed_at IS NOT NULL)
 );
 
-
-/*
-===============================================================================
-12. AUDIT FINDINGS
-===============================================================================
-
-This table stores AUDIT OUTPUT.
-
-The audit engine writes findings here.
-
-It does NOT modify:
-
-    turnout_observations
-    ballot_accounting_observations
-    result_submissions
-
-The audit output uses actual_value and comparison_value with meaningful labels.
-
-Examples:
-    R001: Voter Turnout compared with Registered Voters.
-    R003: Ballots Accounted For compared with Voter Turnout.
-
-For an upper-bound rule:
-
-    actual_value <= comparison_value
-
-For equality or other rules where an upper bound does not apply:
-
-    comparison_value may be NULL.
-
-===============================================================================
-*/
-
 CREATE TABLE audit_findings (
-    audit_finding_id BIGINT
-        GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-
-    audit_run_id BIGINT NOT NULL,
-
-    election_id TEXT NOT NULL,
-
+    audit_finding_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    audit_run_id BIGINT NOT NULL REFERENCES audit_runs(audit_run_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+    election_id TEXT NOT NULL REFERENCES elections(election_id) ON UPDATE CASCADE ON DELETE RESTRICT,
     polling_station_id TEXT,
-
     candidate_id TEXT,
-
     position_id TEXT,
-
     geography_level TEXT,
-
     geography_id TEXT,
-
     rule_code TEXT NOT NULL,
-
-    status TEXT NOT NULL,
-
+    status TEXT NOT NULL CHECK(status IN ('PASSED','FAILED','WARNING')),
     actual_label TEXT NOT NULL DEFAULT 'Actual value',
-
     actual_value INTEGER,
-
     comparison_label TEXT NOT NULL DEFAULT 'Comparison value',
-
     comparison_value INTEGER,
-
     message TEXT NOT NULL,
-
     hash_algorithm TEXT NOT NULL DEFAULT 'BLAKE3-256',
-
-    created_at
-
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     previous_hash TEXT,
-
     current_hash TEXT NOT NULL,
-
-    CONSTRAINT fk_finding_audit_run
-        FOREIGN KEY (audit_run_id)
-        REFERENCES audit_runs(audit_run_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT fk_finding_election
-        FOREIGN KEY (election_id)
-        REFERENCES elections(election_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
+    CONSTRAINT fk_finding_position FOREIGN KEY(position_id) REFERENCES positions(position_id) ON UPDATE CASCADE ON DELETE RESTRICT,
     CONSTRAINT fk_finding_station_election
-        FOREIGN KEY (polling_station_id, election_id)
-        REFERENCES polling_stations(
-            polling_station_id,
-            election_id
-        )
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
+        FOREIGN KEY(polling_station_id,election_id)
+        REFERENCES polling_stations(polling_station_id,election_id)
+        ON UPDATE CASCADE ON DELETE RESTRICT,
     CONSTRAINT fk_finding_candidate_election
-        FOREIGN KEY (candidate_id, election_id)
-        REFERENCES candidates(candidate_id, election_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT fk_finding_position
-        FOREIGN KEY (position_id)
-        REFERENCES positions(position_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT audit_status_check
-        CHECK (
-            status IN (
-                'PASSED',
-                'FAILED',
-                'WARNING'
-            )
-        ),
-
-    CONSTRAINT actual_value_non_negative
-        CHECK (
-            actual_value IS NULL
-            OR actual_value >= 0
-        ),
-
-    CONSTRAINT comparison_value_non_negative
-        CHECK (
-            comparison_value IS NULL
-            OR comparison_value >= 0
-        ),
-
-    CONSTRAINT audit_findings_hash_algorithm_check CHECK (hash_algorithm = 'BLAKE3-256'),
-
-    CONSTRAINT current_hash_format
-        CHECK (
-            current_hash ~ '^[0-9a-f]{64}$'
-        ),
-
-    CONSTRAINT previous_hash_format
-        CHECK (
-            previous_hash IS NULL
-            OR previous_hash ~ '^[0-9a-f]{64}$'
-        )
+        FOREIGN KEY(candidate_id,election_id)
+        REFERENCES candidates(candidate_id,election_id)
+        ON UPDATE CASCADE ON DELETE RESTRICT,
+    CONSTRAINT audit_findings_hash_algorithm_check CHECK(hash_algorithm='BLAKE3-256'),
+    CONSTRAINT current_hash_format CHECK(current_hash ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT previous_hash_format CHECK(previous_hash IS NULL OR previous_hash ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT actual_value_non_negative CHECK(actual_value IS NULL OR actual_value>=0),
+    CONSTRAINT comparison_value_non_negative CHECK(comparison_value IS NULL OR comparison_value>=0)
 );
-
 
 CREATE TABLE audit_passed_results (
     audit_passed_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -1515,7 +516,6 @@ CREATE TABLE audit_passed_results (
     recorded_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-
 CREATE TABLE audit_failed_results (
     audit_failed_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     audit_finding_id BIGINT NOT NULL UNIQUE REFERENCES audit_findings(audit_finding_id),
@@ -1535,7 +535,6 @@ CREATE TABLE audit_failed_results (
     recorded_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-
 CREATE TABLE source_comparisons (
     source_comparison_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     audit_run_id BIGINT NOT NULL REFERENCES audit_runs(audit_run_id),
@@ -1554,7 +553,6 @@ CREATE TABLE source_comparisons (
     compared_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-
 CREATE TABLE audit_position_results (
     audit_position_result_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     audit_run_id BIGINT NOT NULL REFERENCES audit_runs(audit_run_id),
@@ -1564,225 +562,13 @@ CREATE TABLE audit_position_results (
     failed_count INTEGER NOT NULL DEFAULT 0,
     warning_count INTEGER NOT NULL DEFAULT 0,
     recorded_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE (audit_run_id, position_id)
+    UNIQUE(audit_run_id,position_id)
 );
 
+-- ---------------------------------------------------------------------------
+-- Input surface metadata
+-- ---------------------------------------------------------------------------
 
-CREATE INDEX idx_audit_failed_station ON audit_failed_results(election_id, polling_station_id);
-CREATE INDEX idx_audit_failed_geography ON audit_failed_results(election_id, geography_level, geography_id);
-CREATE INDEX idx_source_comparisons_run ON source_comparisons(audit_run_id);
-CREATE INDEX idx_audit_findings_candidate ON audit_findings(election_id, candidate_id);
-CREATE INDEX idx_audit_findings_geography ON audit_findings(election_id, geography_level, geography_id);
-
-
-/*
-===============================================================================
-13. INDEXES
-===============================================================================
-
-Indexes improve lookup and audit-engine performance.
-
-They do not modify source data.
-
-===============================================================================
-*/
-
-CREATE INDEX idx_constituencies_county
-    ON constituencies(county_id);
-
-
-CREATE INDEX idx_wards_constituency
-    ON wards(constituency_id);
-
-
-CREATE INDEX idx_registration_centres_ward
-    ON registration_centres(ward_id);
-
-
-CREATE INDEX idx_polling_stations_election
-    ON polling_stations(election_id);
-
-CREATE INDEX idx_polling_station_turnout_interval
-    ON polling_stations(election_id, polling_station_id, turnout_reporting_interval_minutes);
-
-
-CREATE INDEX idx_polling_stations_registration_centre
-    ON polling_stations(registration_centre_id);
-
-
-CREATE INDEX idx_polling_stations_election_centre
-    ON polling_stations(election_id, registration_centre_id);
-
-
-CREATE INDEX idx_turnout_election_station
-    ON turnout_observations(
-        election_id,
-        polling_station_id
-    );
-
-
-CREATE INDEX idx_turnout_source_document
-    ON turnout_observations(source_document_id);
-
-
-CREATE INDEX idx_ballot_election_station
-    ON ballot_accounting_observations(
-        election_id,
-        polling_station_id
-    );
-
-
-CREATE INDEX idx_ballot_source_document
-    ON ballot_accounting_observations(source_document_id);
-
-
-CREATE INDEX idx_results_election_station
-    ON result_submissions(
-        election_id,
-        polling_station_id
-    );
-
-
-CREATE INDEX idx_results_candidate
-    ON result_submissions(candidate_id);
-
-
-CREATE INDEX idx_results_position
-    ON result_submissions(position_id);
-
-
-CREATE INDEX idx_results_source_document
-    ON result_submissions(source_document_id);
-
-
-CREATE INDEX idx_results_submission_hash
-    ON result_submissions(submission_hash);
-
-
-CREATE INDEX idx_audit_runs_election
-    ON audit_runs(election_id);
-
-
-CREATE INDEX idx_audit_findings_run
-    ON audit_findings(audit_run_id);
-
-
-CREATE INDEX idx_audit_findings_election
-    ON audit_findings(election_id);
-
-
-CREATE INDEX idx_audit_findings_station
-    ON audit_findings(
-        election_id,
-        polling_station_id
-    );
-
-
-/*
-===============================================================================
-14. FINAL SCHEMA VERIFICATION
-===============================================================================
-
-After successfully executing this schema, run:
-
-    SELECT table_name
-    FROM information_schema.tables
-    WHERE table_schema = 'public'
-      AND table_type = 'BASE TABLE'
-    ORDER BY table_name;
-
-Expected tables:
-
-    audit_findings
-    audit_failed_results
-    audit_passed_results
-    audit_position_results
-    audit_runs
-    ballot_accounting_observations
-    candidates
-    positions
-    constituencies
-    counties
-    elections
-    polling_stations
-    registration_centres
-    result_submissions
-    source_documents
-    sources
-    source_comparisons
-    source_submissions
-    submission_validation_results
-    published_aggregate_totals
-    registered_voter_observations
-    turnout_observations
-    wards
-
-===============================================================================
-*/
-
-
-/*
-===============================================================================
-15. FOREIGN KEY VERIFICATION
-===============================================================================
-
-Run this after creating the schema:
-
-    SELECT
-        tc.table_name,
-        kcu.column_name,
-        ccu.table_name AS referenced_table,
-        ccu.column_name AS referenced_column
-    FROM information_schema.table_constraints AS tc
-    JOIN information_schema.key_column_usage AS kcu
-        ON tc.constraint_name = kcu.constraint_name
-       AND tc.table_schema = kcu.table_schema
-    JOIN information_schema.constraint_column_usage AS ccu
-        ON ccu.constraint_name = tc.constraint_name
-       AND ccu.table_schema = tc.table_schema
-    WHERE tc.constraint_type = 'FOREIGN KEY'
-      AND tc.table_schema = 'public'
-    ORDER BY tc.table_name, kcu.column_name;
-
-===============================================================================
-*/
-
-
-/* FORM-DRIVEN CONTEST ACCOUNTING CONTRACT */
-CREATE OR REPLACE FUNCTION etvs_validate_contest_accounting()
-RETURNS TRIGGER LANGUAGE plpgsql AS $
-DECLARE
-    v_election_id TEXT; v_station_id TEXT; v_position_id TEXT;
-    v_turnout INTEGER; v_valid INTEGER; v_rejected INTEGER;
-    v_candidate_total INTEGER; v_result_count INTEGER;
-BEGIN
-    IF TG_OP = 'DELETE' THEN
-        v_election_id := OLD.election_id; v_station_id := OLD.polling_station_id; v_position_id := OLD.position_id;
-    ELSE
-        v_election_id := NEW.election_id; v_station_id := NEW.polling_station_id; v_position_id := NEW.position_id;
-    END IF;
-    IF v_position_id IS NULL THEN RETURN NULL; END IF;
-    SELECT voters_turnout INTO v_turnout FROM turnout_observations WHERE election_id=v_election_id AND polling_station_id=v_station_id ORDER BY observation_version DESC LIMIT 1;
-    SELECT valid_votes,rejected_votes INTO v_valid,v_rejected FROM ballot_accounting_observations WHERE election_id=v_election_id AND polling_station_id=v_station_id AND position_id=v_position_id ORDER BY observation_version DESC LIMIT 1;
-    IF v_turnout IS NULL OR v_valid IS NULL OR v_rejected IS NULL THEN RETURN NULL; END IF;
-    SELECT COUNT(*),COALESCE(SUM(r.votes),0) INTO v_result_count,v_candidate_total FROM (SELECT DISTINCT ON(candidate_id) candidate_id,votes FROM result_submissions WHERE election_id=v_election_id AND polling_station_id=v_station_id AND position_id=v_position_id ORDER BY candidate_id,result_version DESC) r;
-    IF v_result_count=0 THEN RAISE EXCEPTION 'Contest accounting requires candidate results: station %, position %',v_station_id,v_position_id; END IF;
-    IF v_valid<>v_candidate_total THEN RAISE EXCEPTION 'valid_votes (%) must equal total candidate votes (%) for station %, position %',v_valid,v_candidate_total,v_station_id,v_position_id; END IF;
-    IF v_turnout<>v_valid+v_rejected THEN RAISE EXCEPTION 'turnout (%) must equal valid_votes (%) + rejected_votes (%) for station %, position %',v_turnout,v_valid,v_rejected,v_station_id,v_position_id; END IF;
-    RETURN NULL;
-END; $;
-CREATE CONSTRAINT TRIGGER trg_validate_contest_accounting_results AFTER INSERT OR UPDATE OR DELETE ON result_submissions DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION etvs_validate_contest_accounting();
-CREATE CONSTRAINT TRIGGER trg_validate_contest_accounting_ballots AFTER INSERT OR UPDATE OR DELETE ON ballot_accounting_observations DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION etvs_validate_contest_accounting();
-
-/*
-===============================================================================
-END OF ETVS POSTGRESQL SCHEMA
-===============================================================================
-*/
-
-
-
-/* Current source-entry surface. Reference and derived data are not direct input. */
 CREATE TABLE etvs_input_scope (
     input_area TEXT PRIMARY KEY,
     enabled BOOLEAN NOT NULL DEFAULT TRUE,
@@ -1791,2263 +577,65 @@ CREATE TABLE etvs_input_scope (
 
 INSERT INTO etvs_input_scope(input_area,enabled,description) VALUES
 ('POLLING_STATION_DETAILS',TRUE,'Election-specific polling-station configuration and registered-voter baseline.'),
-('TURNOUT_OBSERVATION',TRUE,'Observed voters cast/turnout at a polling station; variable input.'),
-('RESULT_SUBMISSION',TRUE,'Candidate result values by polling station, contest and version.'),
-('BALLOT_ACCOUNTING',TRUE,'Contest-level ballot accounting linked to the station turnout observation.'),
+('TURNOUT_OBSERVATION',TRUE,'One station-wide voters-cast observation at the configured ETVS reporting interval.'),
+('RESULT_SUBMISSION',TRUE,'Candidate result values by polling station and contest after voting closes.'),
+('BALLOT_ACCOUNTING',TRUE,'Contest-level ballot accounting linked to the station turnout observation after voting closes.'),
 ('GEOGRAPHY_REFERENCE',FALSE,'Counties, constituencies and wards are controlled reference data.'),
 ('CANDIDATE_REFERENCE',FALSE,'Candidates and positions are controlled reference data.'),
 ('BALLOT_SECURITY_REFERENCE',FALSE,'Ballot specifications, stock and security metadata are controlled reference data.'),
-('AUDIT_RESULTS',FALSE,'Audit findings are generated by ETVS and are not direct user input.')
-ON CONFLICT(input_area) DO NOTHING;
-),
-    CONSTRAINT turnout_hash_algorithm_check CHECK (hash_algorithm = 'BLAKE3-256'),
-
-    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    CONSTRAINT fk_turnout_election
-        FOREIGN KEY (election_id)
-        REFERENCES elections(election_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT fk_turnout_station_election
-        FOREIGN KEY (polling_station_id, election_id)
-        REFERENCES polling_stations(
-            polling_station_id,
-            election_id
-        )
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT fk_turnout_source_document
-        FOREIGN KEY (source_document_id)
-        REFERENCES source_documents(document_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT turnout_non_negative
-        CHECK (voters_turnout >= 0),
-
-    CONSTRAINT turnout_version_positive
-        CHECK (observation_version > 0),
-
-    CONSTRAINT unique_turnout_observation_version
-        UNIQUE (
-            election_id,
-            polling_station_id,
-            observation_version
-        )
-);
-
-
-CREATE TABLE registered_voter_observations (
-    registered_voter_observation_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    election_id TEXT NOT NULL,
-    polling_station_id TEXT NOT NULL,
-    observation_version INTEGER NOT NULL DEFAULT 1,
-    registered_voters INTEGER NOT NULL,
-    observed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    source_document_id BIGINT,
-    source_reference TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    CONSTRAINT fk_registered_voter_observation_election
-        FOREIGN KEY (election_id) REFERENCES elections(election_id)
-        ON UPDATE CASCADE ON DELETE RESTRICT,
-    CONSTRAINT fk_registered_voter_observation_station_election
-        FOREIGN KEY (polling_station_id, election_id)
-        REFERENCES polling_stations(polling_station_id, election_id)
-        ON UPDATE CASCADE ON DELETE RESTRICT,
-    CONSTRAINT fk_registered_voter_observation_source
-        FOREIGN KEY (source_document_id) REFERENCES source_documents(document_id)
-        ON UPDATE CASCADE ON DELETE RESTRICT,
-    CONSTRAINT registered_voter_observation_version_positive CHECK (observation_version > 0),
-    CONSTRAINT registered_voter_observation_non_negative CHECK (registered_voters >= 0),
-    CONSTRAINT unique_registered_voter_observation_version
-        UNIQUE (election_id, polling_station_id, observation_version)
-);
-
-CREATE INDEX idx_registered_voter_observations_latest
-    ON registered_voter_observations(election_id, polling_station_id, observation_version DESC);
-
-
-/*
-===============================================================================
-9. BALLOT ACCOUNTING OBSERVATIONS
-===============================================================================
-
-INDEPENDENT SOURCE OBSERVATION
-
-Stores the independently observed ballot categories.
-
-The audit engine calculates:
-
-    calculated_ballots =
-        valid_votes
-        + rejected_votes
-        + spoilt_ballots
-
-The calculated value is then compared against turnout.
-
-The original source values remain unchanged.
-
-===============================================================================
-*/
-
-CREATE TABLE ballot_accounting_observations (
-    ballot_accounting_observation_id BIGINT
-        GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-
-    election_id TEXT NOT NULL,
-
-    polling_station_id TEXT NOT NULL,
-
-    position_id TEXT,
-
-    observation_version INTEGER NOT NULL DEFAULT 1,
-
-    valid_votes INTEGER NOT NULL,
-
-    rejected_votes INTEGER NOT NULL,
-
-    spoilt_ballots INTEGER NOT NULL,
-
-    turnout_observation_id BIGINT,
-
-    observed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    source_document_id BIGINT,
-
-    source_reference TEXT,
-
-    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    CONSTRAINT fk_ballot_election
-        FOREIGN KEY (election_id)
-        REFERENCES elections(election_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT fk_ballot_station_election
-        FOREIGN KEY (polling_station_id, election_id)
-        REFERENCES polling_stations(
-            polling_station_id,
-            election_id
-        )
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT fk_ballot_source_document
-        FOREIGN KEY (source_document_id)
-        REFERENCES source_documents(document_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT fk_ballot_position
-        FOREIGN KEY (position_id)
-        REFERENCES positions(position_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT fk_ballot_turnout_observation
-        FOREIGN KEY (turnout_observation_id)
-        REFERENCES turnout_observations(turnout_observation_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT ballot_position_not_null
-        CHECK (position_id IS NOT NULL),
-
-    CONSTRAINT valid_votes_non_negative
-        CHECK (valid_votes >= 0),
-
-    CONSTRAINT rejected_votes_non_negative
-        CHECK (rejected_votes >= 0),
-
-    CONSTRAINT spoilt_ballots_non_negative
-        CHECK (spoilt_ballots >= 0),
-
-    CONSTRAINT ballot_version_positive
-        CHECK (observation_version > 0),
-
-    CONSTRAINT unique_ballot_observation_version
-        UNIQUE (
-            election_id,
-            polling_station_id,
-            position_id,
-            observation_version
-        )
-);
-
-
-/*
-===============================================================================
-10. RESULT SUBMISSIONS
-===============================================================================
-
-A result submission records the reported votes for one candidate at one
-polling station.
-
-Multiple versions are deliberately permitted.
-
-This allows ETVS to detect changes instead of silently overwriting earlier
-submissions.
-
-The composite foreign keys enforce:
-
-    result election
-        =
-    polling station election
-
-and:
-
-    result election
-        =
-    candidate election
-===============================================================================
-*/
-
-CREATE TABLE result_submissions (
-    result_submission_id BIGINT
-        GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-
-    election_id TEXT NOT NULL,
-
-    polling_station_id TEXT NOT NULL,
-
-    candidate_id TEXT NOT NULL,
-
-    result_version INTEGER NOT NULL DEFAULT 1,
-
-    votes INTEGER NOT NULL,
-
-    position_id TEXT,
-
-    submission_hash TEXT,
-
-    submitted_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    source_document_id BIGINT,
-
-    source_reference TEXT,
-
-    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    CONSTRAINT fk_result_election
-        FOREIGN KEY (election_id)
-        REFERENCES elections(election_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT fk_result_station_election
-        FOREIGN KEY (polling_station_id, election_id)
-        REFERENCES polling_stations(
-            polling_station_id,
-            election_id
-        )
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT fk_result_candidate_election
-        FOREIGN KEY (candidate_id, election_id)
-        REFERENCES candidates(
-            candidate_id,
-            election_id
-        )
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT fk_result_position
-        FOREIGN KEY (position_id)
-        REFERENCES positions(position_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT fk_result_source_document
-        FOREIGN KEY (source_document_id)
-        REFERENCES source_documents(document_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT result_votes_non_negative
-        CHECK (votes >= 0),
-
-    CONSTRAINT result_submission_hash_algorithm_check CHECK (hash_algorithm = 'BLAKE3-256'),
-
-    CONSTRAINT result_submission_hash_format
-        CHECK (submission_hash IS NULL OR submission_hash ~ '^[0-9a-f]{64}$'),
-
-    CONSTRAINT result_version_positive
-        CHECK (result_version > 0),
-
-    CONSTRAINT unique_result_version
-        UNIQUE (
-            election_id,
-            polling_station_id,
-            candidate_id,
-            result_version
-        )
-);
-
-
-/*
-===============================================================================
-11. AUDIT RUNS
-===============================================================================
-
-Each execution of the audit engine creates one audit run.
-
-The run identifies the election being audited.
-
-Example:
-
-    audit_run_id = 1
-    election_id  = KE-PRES-2027
-    status       = COMPLETED
-
-===============================================================================
-*/
-
-CREATE TABLE audit_runs (
-    audit_run_id BIGINT
-        GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-
-    election_id TEXT NOT NULL,
-
-    started_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    completed_at TIMESTAMPTZ,
-
-    status TEXT NOT NULL DEFAULT 'RUNNING',
-
-    findings_count INTEGER NOT NULL DEFAULT 0,
-
-    scope_level TEXT,
-
-    scope_id TEXT,
-
-    candidate_id TEXT,
-
-    position_id TEXT,
-
-    CONSTRAINT fk_audit_run_election
-        FOREIGN KEY (election_id)
-        REFERENCES elections(election_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT fk_audit_run_candidate
-        FOREIGN KEY (candidate_id, election_id)
-        REFERENCES candidates(candidate_id, election_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT fk_audit_run_position
-        FOREIGN KEY (position_id)
-        REFERENCES positions(position_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT audit_scope_level_check
-        CHECK (scope_level IS NULL OR scope_level IN (
-            'COUNTY', 'CONSTITUENCY', 'WARD', 'POLLING_STATION'
-        )),
-
-    CONSTRAINT audit_run_status_check
-        CHECK (
-            status IN (
-                'RUNNING',
-                'COMPLETED',
-                'FAILED'
-            )
-        ),
-
-    CONSTRAINT findings_count_non_negative
-        CHECK (findings_count >= 0),
-
-    CONSTRAINT completed_run_has_completion_time
-        CHECK (
-            status = 'RUNNING'
-            OR completed_at IS NOT NULL
-        )
-);
-
-
-/*
-===============================================================================
-12. AUDIT FINDINGS
-===============================================================================
-
-This table stores AUDIT OUTPUT.
-
-The audit engine writes findings here.
-
-It does NOT modify:
-
-    turnout_observations
-    ballot_accounting_observations
-    result_submissions
-
-The audit output uses actual_value and comparison_value with meaningful labels.
-
-Examples:
-    R001: Voter Turnout compared with Registered Voters.
-    R003: Ballots Accounted For compared with Voter Turnout.
-
-For an upper-bound rule:
-
-    actual_value <= comparison_value
-
-For equality or other rules where an upper bound does not apply:
-
-    comparison_value may be NULL.
-
-===============================================================================
-*/
-
-CREATE TABLE audit_findings (
-    audit_finding_id BIGINT
-        GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-
-    audit_run_id BIGINT NOT NULL,
-
-    election_id TEXT NOT NULL,
-
-    polling_station_id TEXT,
-
-    candidate_id TEXT,
-
-    position_id TEXT,
-
-    geography_level TEXT,
-
-    geography_id TEXT,
-
-    rule_code TEXT NOT NULL,
-
-    status TEXT NOT NULL,
-
-    actual_label TEXT NOT NULL DEFAULT 'Actual value',
-
-    actual_value INTEGER,
-
-    comparison_label TEXT NOT NULL DEFAULT 'Comparison value',
-
-    comparison_value INTEGER,
-
-    message TEXT NOT NULL,
-
-    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    previous_hash TEXT,
-
-    current_hash TEXT NOT NULL,
-
-    CONSTRAINT fk_finding_audit_run
-        FOREIGN KEY (audit_run_id)
-        REFERENCES audit_runs(audit_run_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT fk_finding_election
-        FOREIGN KEY (election_id)
-        REFERENCES elections(election_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT fk_finding_station_election
-        FOREIGN KEY (polling_station_id, election_id)
-        REFERENCES polling_stations(
-            polling_station_id,
-            election_id
-        )
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT fk_finding_candidate_election
-        FOREIGN KEY (candidate_id, election_id)
-        REFERENCES candidates(candidate_id, election_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT fk_finding_position
-        FOREIGN KEY (position_id)
-        REFERENCES positions(position_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT audit_status_check
-        CHECK (
-            status IN (
-                'PASSED',
-                'FAILED',
-                'WARNING'
-            )
-        ),
-
-    CONSTRAINT actual_value_non_negative
-        CHECK (
-            actual_value IS NULL
-            OR actual_value >= 0
-        ),
-
-    CONSTRAINT comparison_value_non_negative
-        CHECK (
-            comparison_value IS NULL
-            OR comparison_value >= 0
-        ),
-
-    CONSTRAINT audit_findings_hash_algorithm_check CHECK (hash_algorithm = 'BLAKE3-256'),
-
-    CONSTRAINT current_hash_format
-        CHECK (
-            current_hash ~ '^[0-9a-f]{64}$'
-        ),
-
-    CONSTRAINT previous_hash_format
-        CHECK (
-            previous_hash IS NULL
-            OR previous_hash ~ '^[0-9a-f]{64}$'
-        )
-);
-
-
-CREATE TABLE audit_passed_results (
-    audit_passed_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    audit_finding_id BIGINT NOT NULL UNIQUE REFERENCES audit_findings(audit_finding_id),
-    audit_run_id BIGINT NOT NULL REFERENCES audit_runs(audit_run_id),
-    election_id TEXT NOT NULL REFERENCES elections(election_id),
-    candidate_id TEXT,
-    position_id TEXT,
-    geography_level TEXT,
-    geography_id TEXT,
-    polling_station_id TEXT,
-    rule_code TEXT NOT NULL,
-    message TEXT NOT NULL,
-    actual_label TEXT NOT NULL DEFAULT 'Actual value',
-    actual_value INTEGER,
-    comparison_label TEXT NOT NULL DEFAULT 'Comparison value',
-    comparison_value INTEGER,
-    recorded_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
-
-CREATE TABLE audit_failed_results (
-    audit_failed_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    audit_finding_id BIGINT NOT NULL UNIQUE REFERENCES audit_findings(audit_finding_id),
-    audit_run_id BIGINT NOT NULL REFERENCES audit_runs(audit_run_id),
-    election_id TEXT NOT NULL REFERENCES elections(election_id),
-    candidate_id TEXT,
-    position_id TEXT,
-    geography_level TEXT,
-    geography_id TEXT,
-    polling_station_id TEXT,
-    rule_code TEXT NOT NULL,
-    message TEXT NOT NULL,
-    actual_label TEXT NOT NULL DEFAULT 'Actual value',
-    actual_value INTEGER,
-    comparison_label TEXT NOT NULL DEFAULT 'Comparison value',
-    comparison_value INTEGER,
-    recorded_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
-
-CREATE TABLE source_comparisons (
-    source_comparison_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    audit_run_id BIGINT NOT NULL REFERENCES audit_runs(audit_run_id),
-    election_id TEXT NOT NULL REFERENCES elections(election_id),
-    published_document_id BIGINT NOT NULL REFERENCES source_documents(document_id),
-    derived_source_document_id BIGINT REFERENCES source_documents(document_id),
-    aggregation_level TEXT NOT NULL,
-    geography_id TEXT NOT NULL,
-    candidate_id TEXT,
-    position_id TEXT,
-    metric TEXT NOT NULL,
-    published_value INTEGER,
-    derived_value INTEGER,
-    difference INTEGER,
-    status TEXT NOT NULL,
-    compared_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
-
-CREATE TABLE audit_position_results (
-    audit_position_result_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    audit_run_id BIGINT NOT NULL REFERENCES audit_runs(audit_run_id),
-    election_id TEXT NOT NULL REFERENCES elections(election_id),
-    position_id TEXT NOT NULL REFERENCES positions(position_id),
-    passed_count INTEGER NOT NULL DEFAULT 0,
-    failed_count INTEGER NOT NULL DEFAULT 0,
-    warning_count INTEGER NOT NULL DEFAULT 0,
-    recorded_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE (audit_run_id, position_id)
-);
-
-
-CREATE INDEX idx_audit_failed_station ON audit_failed_results(election_id, polling_station_id);
-CREATE INDEX idx_audit_failed_geography ON audit_failed_results(election_id, geography_level, geography_id);
+('AUDIT_RESULTS',FALSE,'Audit findings are generated by ETVS and are not direct user input.');
+
+-- ---------------------------------------------------------------------------
+-- Indexes
+-- ---------------------------------------------------------------------------
+
+CREATE INDEX idx_counties_region ON counties(region_id);
+CREATE INDEX idx_constituencies_county ON constituencies(county_id);
+CREATE INDEX idx_wards_constituency ON wards(constituency_id);
+CREATE INDEX idx_registration_centres_ward ON registration_centres(ward_id);
+CREATE INDEX idx_polling_stations_election ON polling_stations(election_id);
+CREATE INDEX idx_polling_stations_registration_centre ON polling_stations(registration_centre_id);
+CREATE INDEX idx_polling_station_turnout_interval ON polling_stations(election_id,polling_station_id,turnout_reporting_interval_minutes);
+CREATE INDEX idx_turnout_election_station ON turnout_observations(election_id,polling_station_id,observed_at);
+CREATE INDEX idx_registered_voter_latest ON registered_voter_observations(election_id,polling_station_id,observation_version DESC);
+CREATE INDEX idx_ballot_accounting_latest ON ballot_accounting_observations(election_id,polling_station_id,position_id,observation_version DESC);
+CREATE INDEX idx_results_election_station ON result_submissions(election_id,polling_station_id);
+CREATE INDEX idx_results_candidate ON result_submissions(candidate_id);
+CREATE INDEX idx_results_position ON result_submissions(position_id);
+CREATE INDEX idx_results_submission_hash ON result_submissions(submission_hash);
+CREATE INDEX idx_ballot_security_features_spec ON ballot_security_features(ballot_specification_id);
+CREATE INDEX idx_ballot_stock_batches_lookup ON ballot_stock_batches(election_id,position_id,polling_station_id);
+CREATE INDEX idx_ballot_units_station_position ON ballot_units(election_id,polling_station_id,position_id);
+CREATE INDEX idx_ballot_security_observations_station ON ballot_security_observations(election_id,polling_station_id);
+CREATE INDEX idx_ballot_security_observations_serial ON ballot_security_observations(election_id,ballot_specification_id,serial_number);
+CREATE INDEX idx_audit_runs_election ON audit_runs(election_id);
+CREATE INDEX idx_audit_findings_run ON audit_findings(audit_run_id);
+CREATE INDEX idx_audit_findings_election ON audit_findings(election_id);
+CREATE INDEX idx_audit_findings_station ON audit_findings(election_id,polling_station_id);
+CREATE INDEX idx_audit_findings_candidate ON audit_findings(election_id,candidate_id);
 CREATE INDEX idx_source_comparisons_run ON source_comparisons(audit_run_id);
-CREATE INDEX idx_audit_findings_candidate ON audit_findings(election_id, candidate_id);
-CREATE INDEX idx_audit_findings_geography ON audit_findings(election_id, geography_level, geography_id);
 
-
-/*
-===============================================================================
-13. INDEXES
-===============================================================================
-
-Indexes improve lookup and audit-engine performance.
-
-They do not modify source data.
-
-===============================================================================
-*/
-
-CREATE INDEX idx_constituencies_county
-    ON constituencies(county_id);
-
-
-CREATE INDEX idx_wards_constituency
-    ON wards(constituency_id);
-
-
-CREATE INDEX idx_registration_centres_ward
-    ON registration_centres(ward_id);
-
-
-CREATE INDEX idx_polling_stations_election
-    ON polling_stations(election_id);
-
-CREATE INDEX idx_polling_station_turnout_interval
-    ON polling_stations(election_id, polling_station_id, turnout_reporting_interval_minutes);
-
-
-CREATE INDEX idx_polling_stations_registration_centre
-    ON polling_stations(registration_centre_id);
-
-
-CREATE INDEX idx_polling_stations_election_centre
-    ON polling_stations(election_id, registration_centre_id);
-
-
-CREATE INDEX idx_turnout_election_station
-    ON turnout_observations(
-        election_id,
-        polling_station_id
-    );
-
-
-CREATE INDEX idx_turnout_source_document
-    ON turnout_observations(source_document_id);
-
-
-CREATE INDEX idx_ballot_election_station
-    ON ballot_accounting_observations(
-        election_id,
-        polling_station_id
-    );
-
-
-CREATE INDEX idx_ballot_source_document
-    ON ballot_accounting_observations(source_document_id);
-
-
-CREATE INDEX idx_results_election_station
-    ON result_submissions(
-        election_id,
-        polling_station_id
-    );
-
-
-CREATE INDEX idx_results_candidate
-    ON result_submissions(candidate_id);
-
-
-CREATE INDEX idx_results_position
-    ON result_submissions(position_id);
-
-
-CREATE INDEX idx_results_source_document
-    ON result_submissions(source_document_id);
-
-
-CREATE INDEX idx_results_submission_hash
-    ON result_submissions(submission_hash);
-
-
-CREATE INDEX idx_audit_runs_election
-    ON audit_runs(election_id);
-
-
-CREATE INDEX idx_audit_findings_run
-    ON audit_findings(audit_run_id);
-
-
-CREATE INDEX idx_audit_findings_election
-    ON audit_findings(election_id);
-
-
-CREATE INDEX idx_audit_findings_station
-    ON audit_findings(
-        election_id,
-        polling_station_id
-    );
-
-
-/*
-===============================================================================
-14. FINAL SCHEMA VERIFICATION
-===============================================================================
-
-After successfully executing this schema, run:
-
-    SELECT table_name
-    FROM information_schema.tables
-    WHERE table_schema = 'public'
-      AND table_type = 'BASE TABLE'
-    ORDER BY table_name;
-
-Expected tables:
-
-    audit_findings
-    audit_failed_results
-    audit_passed_results
-    audit_position_results
-    audit_runs
-    ballot_accounting_observations
-    candidates
-    positions
-    constituencies
-    counties
-    elections
-    polling_stations
-    registration_centres
-    result_submissions
-    source_documents
-    sources
-    source_comparisons
-    source_submissions
-    submission_validation_results
-    published_aggregate_totals
-    registered_voter_observations
-    turnout_observations
-    wards
-
-===============================================================================
-*/
-
-
-/*
-===============================================================================
-15. FOREIGN KEY VERIFICATION
-===============================================================================
-
-Run this after creating the schema:
-
-    SELECT
-        tc.table_name,
-        kcu.column_name,
-        ccu.table_name AS referenced_table,
-        ccu.column_name AS referenced_column
-    FROM information_schema.table_constraints AS tc
-    JOIN information_schema.key_column_usage AS kcu
-        ON tc.constraint_name = kcu.constraint_name
-       AND tc.table_schema = kcu.table_schema
-    JOIN information_schema.constraint_column_usage AS ccu
-        ON ccu.constraint_name = tc.constraint_name
-       AND ccu.table_schema = tc.table_schema
-    WHERE tc.constraint_type = 'FOREIGN KEY'
-      AND tc.table_schema = 'public'
-    ORDER BY tc.table_name, kcu.column_name;
-
-===============================================================================
-*/
-
-
-/*
-===============================================================================
-END OF ETVS POSTGRESQL SCHEMA
-===============================================================================
-*/
-
-
-
-/* Current source-entry surface. Reference and derived data are not direct input. */
-CREATE TABLE etvs_input_scope (
-    input_area TEXT PRIMARY KEY,
-    enabled BOOLEAN NOT NULL DEFAULT TRUE,
-    description TEXT NOT NULL
-);
-
-INSERT INTO etvs_input_scope(input_area,enabled,description) VALUES
-('POLLING_STATION_DETAILS',TRUE,'Election-specific polling-station configuration and registered-voter baseline.'),
-('TURNOUT_OBSERVATION',TRUE,'Observed voters cast/turnout at a polling station; variable input.'),
-('RESULT_SUBMISSION',TRUE,'Candidate result values by polling station, contest and version.'),
-('BALLOT_ACCOUNTING',TRUE,'Contest-level ballot accounting linked to the station turnout observation.'),
-('GEOGRAPHY_REFERENCE',FALSE,'Counties, constituencies and wards are controlled reference data.'),
-('CANDIDATE_REFERENCE',FALSE,'Candidates and positions are controlled reference data.'),
-('BALLOT_SECURITY_REFERENCE',FALSE,'Ballot specifications, stock and security metadata are controlled reference data.'),
-('AUDIT_RESULTS',FALSE,'Audit findings are generated by ETVS and are not direct user input.')
-ON CONFLICT(input_area) DO NOTHING;
-),
-    CONSTRAINT ballot_hash_algorithm_check CHECK (hash_algorithm = 'BLAKE3-256'),
-
-    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    CONSTRAINT fk_ballot_election
-        FOREIGN KEY (election_id)
-        REFERENCES elections(election_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT fk_ballot_station_election
-        FOREIGN KEY (polling_station_id, election_id)
-        REFERENCES polling_stations(
-            polling_station_id,
-            election_id
-        )
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT fk_ballot_source_document
-        FOREIGN KEY (source_document_id)
-        REFERENCES source_documents(document_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT fk_ballot_position
-        FOREIGN KEY (position_id)
-        REFERENCES positions(position_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT fk_ballot_turnout_observation
-        FOREIGN KEY (turnout_observation_id)
-        REFERENCES turnout_observations(turnout_observation_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT ballot_position_not_null
-        CHECK (position_id IS NOT NULL),
-
-    CONSTRAINT valid_votes_non_negative
-        CHECK (valid_votes >= 0),
-
-    CONSTRAINT rejected_votes_non_negative
-        CHECK (rejected_votes >= 0),
-
-    CONSTRAINT spoilt_ballots_non_negative
-        CHECK (spoilt_ballots >= 0),
-
-    CONSTRAINT ballot_version_positive
-        CHECK (observation_version > 0),
-
-    CONSTRAINT unique_ballot_observation_version
-        UNIQUE (
-            election_id,
-            polling_station_id,
-            position_id,
-            observation_version
-        )
-);
-
-
-/*
-===============================================================================
-10. RESULT SUBMISSIONS
-===============================================================================
-
-A result submission records the reported votes for one candidate at one
-polling station.
-
-Multiple versions are deliberately permitted.
-
-This allows ETVS to detect changes instead of silently overwriting earlier
-submissions.
-
-The composite foreign keys enforce:
-
-    result election
-        =
-    polling station election
-
-and:
-
-    result election
-        =
-    candidate election
-===============================================================================
-*/
-
-CREATE TABLE result_submissions (
-    result_submission_id BIGINT
-        GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-
-    election_id TEXT NOT NULL,
-
-    polling_station_id TEXT NOT NULL,
-
-    candidate_id TEXT NOT NULL,
-
-    result_version INTEGER NOT NULL DEFAULT 1,
-
-    votes INTEGER NOT NULL,
-
-    position_id TEXT,
-
-    submission_hash TEXT,
-
-    submitted_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    source_document_id BIGINT,
-
-    source_reference TEXT,
-
-    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    CONSTRAINT fk_result_election
-        FOREIGN KEY (election_id)
-        REFERENCES elections(election_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT fk_result_station_election
-        FOREIGN KEY (polling_station_id, election_id)
-        REFERENCES polling_stations(
-            polling_station_id,
-            election_id
-        )
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT fk_result_candidate_election
-        FOREIGN KEY (candidate_id, election_id)
-        REFERENCES candidates(
-            candidate_id,
-            election_id
-        )
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT fk_result_position
-        FOREIGN KEY (position_id)
-        REFERENCES positions(position_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT fk_result_source_document
-        FOREIGN KEY (source_document_id)
-        REFERENCES source_documents(document_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT result_votes_non_negative
-        CHECK (votes >= 0),
-
-    CONSTRAINT result_submission_hash_algorithm_check CHECK (hash_algorithm = 'BLAKE3-256'),
-
-    CONSTRAINT result_submission_hash_format
-        CHECK (submission_hash IS NULL OR submission_hash ~ '^[0-9a-f]{64}$'),
-
-    CONSTRAINT result_version_positive
-        CHECK (result_version > 0),
-
-    CONSTRAINT unique_result_version
-        UNIQUE (
-            election_id,
-            polling_station_id,
-            candidate_id,
-            result_version
-        )
-);
-
-
-/*
-===============================================================================
-11. AUDIT RUNS
-===============================================================================
-
-Each execution of the audit engine creates one audit run.
-
-The run identifies the election being audited.
-
-Example:
-
-    audit_run_id = 1
-    election_id  = KE-PRES-2027
-    status       = COMPLETED
-
-===============================================================================
-*/
-
-CREATE TABLE audit_runs (
-    audit_run_id BIGINT
-        GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-
-    election_id TEXT NOT NULL,
-
-    started_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    completed_at TIMESTAMPTZ,
-
-    status TEXT NOT NULL DEFAULT 'RUNNING',
-
-    findings_count INTEGER NOT NULL DEFAULT 0,
-
-    scope_level TEXT,
-
-    scope_id TEXT,
-
-    candidate_id TEXT,
-
-    position_id TEXT,
-
-    CONSTRAINT fk_audit_run_election
-        FOREIGN KEY (election_id)
-        REFERENCES elections(election_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT fk_audit_run_candidate
-        FOREIGN KEY (candidate_id, election_id)
-        REFERENCES candidates(candidate_id, election_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT fk_audit_run_position
-        FOREIGN KEY (position_id)
-        REFERENCES positions(position_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT audit_scope_level_check
-        CHECK (scope_level IS NULL OR scope_level IN (
-            'COUNTY', 'CONSTITUENCY', 'WARD', 'POLLING_STATION'
-        )),
-
-    CONSTRAINT audit_run_status_check
-        CHECK (
-            status IN (
-                'RUNNING',
-                'COMPLETED',
-                'FAILED'
-            )
-        ),
-
-    CONSTRAINT findings_count_non_negative
-        CHECK (findings_count >= 0),
-
-    CONSTRAINT completed_run_has_completion_time
-        CHECK (
-            status = 'RUNNING'
-            OR completed_at IS NOT NULL
-        )
-);
-
-
-/*
-===============================================================================
-12. AUDIT FINDINGS
-===============================================================================
-
-This table stores AUDIT OUTPUT.
-
-The audit engine writes findings here.
-
-It does NOT modify:
-
-    turnout_observations
-    ballot_accounting_observations
-    result_submissions
-
-The audit output uses actual_value and comparison_value with meaningful labels.
-
-Examples:
-    R001: Voter Turnout compared with Registered Voters.
-    R003: Ballots Accounted For compared with Voter Turnout.
-
-For an upper-bound rule:
-
-    actual_value <= comparison_value
-
-For equality or other rules where an upper bound does not apply:
-
-    comparison_value may be NULL.
-
-===============================================================================
-*/
-
-CREATE TABLE audit_findings (
-    audit_finding_id BIGINT
-        GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-
-    audit_run_id BIGINT NOT NULL,
-
-    election_id TEXT NOT NULL,
-
-    polling_station_id TEXT,
-
-    candidate_id TEXT,
-
-    position_id TEXT,
-
-    geography_level TEXT,
-
-    geography_id TEXT,
-
-    rule_code TEXT NOT NULL,
-
-    status TEXT NOT NULL,
-
-    actual_label TEXT NOT NULL DEFAULT 'Actual value',
-
-    actual_value INTEGER,
-
-    comparison_label TEXT NOT NULL DEFAULT 'Comparison value',
-
-    comparison_value INTEGER,
-
-    message TEXT NOT NULL,
-
-    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    previous_hash TEXT,
-
-    current_hash TEXT NOT NULL,
-
-    CONSTRAINT fk_finding_audit_run
-        FOREIGN KEY (audit_run_id)
-        REFERENCES audit_runs(audit_run_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT fk_finding_election
-        FOREIGN KEY (election_id)
-        REFERENCES elections(election_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT fk_finding_station_election
-        FOREIGN KEY (polling_station_id, election_id)
-        REFERENCES polling_stations(
-            polling_station_id,
-            election_id
-        )
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT fk_finding_candidate_election
-        FOREIGN KEY (candidate_id, election_id)
-        REFERENCES candidates(candidate_id, election_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT fk_finding_position
-        FOREIGN KEY (position_id)
-        REFERENCES positions(position_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT audit_status_check
-        CHECK (
-            status IN (
-                'PASSED',
-                'FAILED',
-                'WARNING'
-            )
-        ),
-
-    CONSTRAINT actual_value_non_negative
-        CHECK (
-            actual_value IS NULL
-            OR actual_value >= 0
-        ),
-
-    CONSTRAINT comparison_value_non_negative
-        CHECK (
-            comparison_value IS NULL
-            OR comparison_value >= 0
-        ),
-
-    CONSTRAINT audit_findings_hash_algorithm_check CHECK (hash_algorithm = 'BLAKE3-256'),
-
-    CONSTRAINT current_hash_format
-        CHECK (
-            current_hash ~ '^[0-9a-f]{64}$'
-        ),
-
-    CONSTRAINT previous_hash_format
-        CHECK (
-            previous_hash IS NULL
-            OR previous_hash ~ '^[0-9a-f]{64}$'
-        )
-);
-
-
-CREATE TABLE audit_passed_results (
-    audit_passed_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    audit_finding_id BIGINT NOT NULL UNIQUE REFERENCES audit_findings(audit_finding_id),
-    audit_run_id BIGINT NOT NULL REFERENCES audit_runs(audit_run_id),
-    election_id TEXT NOT NULL REFERENCES elections(election_id),
-    candidate_id TEXT,
-    position_id TEXT,
-    geography_level TEXT,
-    geography_id TEXT,
-    polling_station_id TEXT,
-    rule_code TEXT NOT NULL,
-    message TEXT NOT NULL,
-    actual_label TEXT NOT NULL DEFAULT 'Actual value',
-    actual_value INTEGER,
-    comparison_label TEXT NOT NULL DEFAULT 'Comparison value',
-    comparison_value INTEGER,
-    recorded_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
-
-CREATE TABLE audit_failed_results (
-    audit_failed_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    audit_finding_id BIGINT NOT NULL UNIQUE REFERENCES audit_findings(audit_finding_id),
-    audit_run_id BIGINT NOT NULL REFERENCES audit_runs(audit_run_id),
-    election_id TEXT NOT NULL REFERENCES elections(election_id),
-    candidate_id TEXT,
-    position_id TEXT,
-    geography_level TEXT,
-    geography_id TEXT,
-    polling_station_id TEXT,
-    rule_code TEXT NOT NULL,
-    message TEXT NOT NULL,
-    actual_label TEXT NOT NULL DEFAULT 'Actual value',
-    actual_value INTEGER,
-    comparison_label TEXT NOT NULL DEFAULT 'Comparison value',
-    comparison_value INTEGER,
-    recorded_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
-
-CREATE TABLE source_comparisons (
-    source_comparison_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    audit_run_id BIGINT NOT NULL REFERENCES audit_runs(audit_run_id),
-    election_id TEXT NOT NULL REFERENCES elections(election_id),
-    published_document_id BIGINT NOT NULL REFERENCES source_documents(document_id),
-    derived_source_document_id BIGINT REFERENCES source_documents(document_id),
-    aggregation_level TEXT NOT NULL,
-    geography_id TEXT NOT NULL,
-    candidate_id TEXT,
-    position_id TEXT,
-    metric TEXT NOT NULL,
-    published_value INTEGER,
-    derived_value INTEGER,
-    difference INTEGER,
-    status TEXT NOT NULL,
-    compared_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
-
-CREATE TABLE audit_position_results (
-    audit_position_result_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    audit_run_id BIGINT NOT NULL REFERENCES audit_runs(audit_run_id),
-    election_id TEXT NOT NULL REFERENCES elections(election_id),
-    position_id TEXT NOT NULL REFERENCES positions(position_id),
-    passed_count INTEGER NOT NULL DEFAULT 0,
-    failed_count INTEGER NOT NULL DEFAULT 0,
-    warning_count INTEGER NOT NULL DEFAULT 0,
-    recorded_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE (audit_run_id, position_id)
-);
-
-
-CREATE INDEX idx_audit_failed_station ON audit_failed_results(election_id, polling_station_id);
-CREATE INDEX idx_audit_failed_geography ON audit_failed_results(election_id, geography_level, geography_id);
-CREATE INDEX idx_source_comparisons_run ON source_comparisons(audit_run_id);
-CREATE INDEX idx_audit_findings_candidate ON audit_findings(election_id, candidate_id);
-CREATE INDEX idx_audit_findings_geography ON audit_findings(election_id, geography_level, geography_id);
-
-
-/*
-===============================================================================
-13. INDEXES
-===============================================================================
-
-Indexes improve lookup and audit-engine performance.
-
-They do not modify source data.
-
-===============================================================================
-*/
-
-CREATE INDEX idx_constituencies_county
-    ON constituencies(county_id);
-
-
-CREATE INDEX idx_wards_constituency
-    ON wards(constituency_id);
-
-
-CREATE INDEX idx_registration_centres_ward
-    ON registration_centres(ward_id);
-
-
-CREATE INDEX idx_polling_stations_election
-    ON polling_stations(election_id);
-
-CREATE INDEX idx_polling_station_turnout_interval
-    ON polling_stations(election_id, polling_station_id, turnout_reporting_interval_minutes);
-
-
-CREATE INDEX idx_polling_stations_registration_centre
-    ON polling_stations(registration_centre_id);
-
-
-CREATE INDEX idx_polling_stations_election_centre
-    ON polling_stations(election_id, registration_centre_id);
-
-
-CREATE INDEX idx_turnout_election_station
-    ON turnout_observations(
-        election_id,
-        polling_station_id
-    );
-
-
-CREATE INDEX idx_turnout_source_document
-    ON turnout_observations(source_document_id);
-
-
-CREATE INDEX idx_ballot_election_station
-    ON ballot_accounting_observations(
-        election_id,
-        polling_station_id
-    );
-
-
-CREATE INDEX idx_ballot_source_document
-    ON ballot_accounting_observations(source_document_id);
-
-
-CREATE INDEX idx_results_election_station
-    ON result_submissions(
-        election_id,
-        polling_station_id
-    );
-
-
-CREATE INDEX idx_results_candidate
-    ON result_submissions(candidate_id);
-
-
-CREATE INDEX idx_results_position
-    ON result_submissions(position_id);
-
-
-CREATE INDEX idx_results_source_document
-    ON result_submissions(source_document_id);
-
-
-CREATE INDEX idx_results_submission_hash
-    ON result_submissions(submission_hash);
-
-
-CREATE INDEX idx_audit_runs_election
-    ON audit_runs(election_id);
-
-
-CREATE INDEX idx_audit_findings_run
-    ON audit_findings(audit_run_id);
-
-
-CREATE INDEX idx_audit_findings_election
-    ON audit_findings(election_id);
-
-
-CREATE INDEX idx_audit_findings_station
-    ON audit_findings(
-        election_id,
-        polling_station_id
-    );
-
-
-/*
-===============================================================================
-14. FINAL SCHEMA VERIFICATION
-===============================================================================
-
-After successfully executing this schema, run:
-
-    SELECT table_name
-    FROM information_schema.tables
-    WHERE table_schema = 'public'
-      AND table_type = 'BASE TABLE'
-    ORDER BY table_name;
-
-Expected tables:
-
-    audit_findings
-    audit_failed_results
-    audit_passed_results
-    audit_position_results
-    audit_runs
-    ballot_accounting_observations
-    candidates
-    positions
-    constituencies
-    counties
-    elections
-    polling_stations
-    registration_centres
-    result_submissions
-    source_documents
-    sources
-    source_comparisons
-    source_submissions
-    submission_validation_results
-    published_aggregate_totals
-    registered_voter_observations
-    turnout_observations
-    wards
-
-===============================================================================
-*/
-
-
-/*
-===============================================================================
-15. FOREIGN KEY VERIFICATION
-===============================================================================
-
-Run this after creating the schema:
-
-    SELECT
-        tc.table_name,
-        kcu.column_name,
-        ccu.table_name AS referenced_table,
-        ccu.column_name AS referenced_column
-    FROM information_schema.table_constraints AS tc
-    JOIN information_schema.key_column_usage AS kcu
-        ON tc.constraint_name = kcu.constraint_name
-       AND tc.table_schema = kcu.table_schema
-    JOIN information_schema.constraint_column_usage AS ccu
-        ON ccu.constraint_name = tc.constraint_name
-       AND ccu.table_schema = tc.table_schema
-    WHERE tc.constraint_type = 'FOREIGN KEY'
-      AND tc.table_schema = 'public'
-    ORDER BY tc.table_name, kcu.column_name;
-
-===============================================================================
-*/
-
-
-/*
-===============================================================================
-END OF ETVS POSTGRESQL SCHEMA
-===============================================================================
-*/
-
-
-
-/* Current source-entry surface. Reference and derived data are not direct input. */
-CREATE TABLE etvs_input_scope (
-    input_area TEXT PRIMARY KEY,
-    enabled BOOLEAN NOT NULL DEFAULT TRUE,
-    description TEXT NOT NULL
-);
-
-INSERT INTO etvs_input_scope(input_area,enabled,description) VALUES
-('POLLING_STATION_DETAILS',TRUE,'Election-specific polling-station configuration and registered-voter baseline.'),
-('TURNOUT_OBSERVATION',TRUE,'Observed voters cast/turnout at a polling station; variable input.'),
-('RESULT_SUBMISSION',TRUE,'Candidate result values by polling station, contest and version.'),
-('BALLOT_ACCOUNTING',TRUE,'Contest-level ballot accounting linked to the station turnout observation.'),
-('GEOGRAPHY_REFERENCE',FALSE,'Counties, constituencies and wards are controlled reference data.'),
-('CANDIDATE_REFERENCE',FALSE,'Candidates and positions are controlled reference data.'),
-('BALLOT_SECURITY_REFERENCE',FALSE,'Ballot specifications, stock and security metadata are controlled reference data.'),
-('AUDIT_RESULTS',FALSE,'Audit findings are generated by ETVS and are not direct user input.')
-ON CONFLICT(input_area) DO NOTHING;
-),
-    CONSTRAINT turnout_hash_algorithm_check CHECK (hash_algorithm = 'BLAKE3-256'),
-
-    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    CONSTRAINT fk_turnout_election
-        FOREIGN KEY (election_id)
-        REFERENCES elections(election_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT fk_turnout_station_election
-        FOREIGN KEY (polling_station_id, election_id)
-        REFERENCES polling_stations(
-            polling_station_id,
-            election_id
-        )
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT fk_turnout_source_document
-        FOREIGN KEY (source_document_id)
-        REFERENCES source_documents(document_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT turnout_non_negative
-        CHECK (voters_turnout >= 0),
-
-    CONSTRAINT turnout_version_positive
-        CHECK (observation_version > 0),
-
-    CONSTRAINT unique_turnout_observation_version
-        UNIQUE (
-            election_id,
-            polling_station_id,
-            observation_version
-        )
-);
-
-
-CREATE TABLE registered_voter_observations (
-    registered_voter_observation_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    election_id TEXT NOT NULL,
-    polling_station_id TEXT NOT NULL,
-    observation_version INTEGER NOT NULL DEFAULT 1,
-    registered_voters INTEGER NOT NULL,
-    observed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    source_document_id BIGINT,
-    source_reference TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    CONSTRAINT fk_registered_voter_observation_election
-        FOREIGN KEY (election_id) REFERENCES elections(election_id)
-        ON UPDATE CASCADE ON DELETE RESTRICT,
-    CONSTRAINT fk_registered_voter_observation_station_election
-        FOREIGN KEY (polling_station_id, election_id)
-        REFERENCES polling_stations(polling_station_id, election_id)
-        ON UPDATE CASCADE ON DELETE RESTRICT,
-    CONSTRAINT fk_registered_voter_observation_source
-        FOREIGN KEY (source_document_id) REFERENCES source_documents(document_id)
-        ON UPDATE CASCADE ON DELETE RESTRICT,
-    CONSTRAINT registered_voter_observation_version_positive CHECK (observation_version > 0),
-    CONSTRAINT registered_voter_observation_non_negative CHECK (registered_voters >= 0),
-    CONSTRAINT unique_registered_voter_observation_version
-        UNIQUE (election_id, polling_station_id, observation_version)
-);
-
-CREATE INDEX idx_registered_voter_observations_latest
-    ON registered_voter_observations(election_id, polling_station_id, observation_version DESC);
-
-
-/*
-===============================================================================
-9. BALLOT ACCOUNTING OBSERVATIONS
-===============================================================================
-
-INDEPENDENT SOURCE OBSERVATION
-
-Stores the independently observed ballot categories.
-
-The audit engine calculates:
-
-    calculated_ballots =
-        valid_votes
-        + rejected_votes
-        + spoilt_ballots
-
-The calculated value is then compared against turnout.
-
-The original source values remain unchanged.
-
-===============================================================================
-*/
-
-CREATE TABLE ballot_accounting_observations (
-    ballot_accounting_observation_id BIGINT
-        GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-
-    election_id TEXT NOT NULL,
-
-    polling_station_id TEXT NOT NULL,
-
-    position_id TEXT,
-
-    observation_version INTEGER NOT NULL DEFAULT 1,
-
-    valid_votes INTEGER NOT NULL,
-
-    rejected_votes INTEGER NOT NULL,
-
-    spoilt_ballots INTEGER NOT NULL,
-
-    turnout_observation_id BIGINT,
-
-    observed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    source_document_id BIGINT,
-
-    source_reference TEXT,
-
-    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    CONSTRAINT fk_ballot_election
-        FOREIGN KEY (election_id)
-        REFERENCES elections(election_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT fk_ballot_station_election
-        FOREIGN KEY (polling_station_id, election_id)
-        REFERENCES polling_stations(
-            polling_station_id,
-            election_id
-        )
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT fk_ballot_source_document
-        FOREIGN KEY (source_document_id)
-        REFERENCES source_documents(document_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT fk_ballot_position
-        FOREIGN KEY (position_id)
-        REFERENCES positions(position_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT fk_ballot_turnout_observation
-        FOREIGN KEY (turnout_observation_id)
-        REFERENCES turnout_observations(turnout_observation_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT ballot_position_not_null
-        CHECK (position_id IS NOT NULL),
-
-    CONSTRAINT valid_votes_non_negative
-        CHECK (valid_votes >= 0),
-
-    CONSTRAINT rejected_votes_non_negative
-        CHECK (rejected_votes >= 0),
-
-    CONSTRAINT spoilt_ballots_non_negative
-        CHECK (spoilt_ballots >= 0),
-
-    CONSTRAINT ballot_version_positive
-        CHECK (observation_version > 0),
-
-    CONSTRAINT unique_ballot_observation_version
-        UNIQUE (
-            election_id,
-            polling_station_id,
-            position_id,
-            observation_version
-        )
-);
-
-
-/*
-===============================================================================
-10. RESULT SUBMISSIONS
-===============================================================================
-
-A result submission records the reported votes for one candidate at one
-polling station.
-
-Multiple versions are deliberately permitted.
-
-This allows ETVS to detect changes instead of silently overwriting earlier
-submissions.
-
-The composite foreign keys enforce:
-
-    result election
-        =
-    polling station election
-
-and:
-
-    result election
-        =
-    candidate election
-===============================================================================
-*/
-
-CREATE TABLE result_submissions (
-    result_submission_id BIGINT
-        GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-
-    election_id TEXT NOT NULL,
-
-    polling_station_id TEXT NOT NULL,
-
-    candidate_id TEXT NOT NULL,
-
-    result_version INTEGER NOT NULL DEFAULT 1,
-
-    votes INTEGER NOT NULL,
-
-    position_id TEXT,
-
-    submission_hash TEXT,
-
-    submitted_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    source_document_id BIGINT,
-
-    source_reference TEXT,
-
-    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    CONSTRAINT fk_result_election
-        FOREIGN KEY (election_id)
-        REFERENCES elections(election_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT fk_result_station_election
-        FOREIGN KEY (polling_station_id, election_id)
-        REFERENCES polling_stations(
-            polling_station_id,
-            election_id
-        )
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT fk_result_candidate_election
-        FOREIGN KEY (candidate_id, election_id)
-        REFERENCES candidates(
-            candidate_id,
-            election_id
-        )
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT fk_result_position
-        FOREIGN KEY (position_id)
-        REFERENCES positions(position_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT fk_result_source_document
-        FOREIGN KEY (source_document_id)
-        REFERENCES source_documents(document_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT result_votes_non_negative
-        CHECK (votes >= 0),
-
-    CONSTRAINT result_submission_hash_algorithm_check CHECK (hash_algorithm = 'BLAKE3-256'),
-
-    CONSTRAINT result_submission_hash_format
-        CHECK (submission_hash IS NULL OR submission_hash ~ '^[0-9a-f]{64}$'),
-
-    CONSTRAINT result_version_positive
-        CHECK (result_version > 0),
-
-    CONSTRAINT unique_result_version
-        UNIQUE (
-            election_id,
-            polling_station_id,
-            candidate_id,
-            result_version
-        )
-);
-
-
-/*
-===============================================================================
-11. AUDIT RUNS
-===============================================================================
-
-Each execution of the audit engine creates one audit run.
-
-The run identifies the election being audited.
-
-Example:
-
-    audit_run_id = 1
-    election_id  = KE-PRES-2027
-    status       = COMPLETED
-
-===============================================================================
-*/
-
-CREATE TABLE audit_runs (
-    audit_run_id BIGINT
-        GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-
-    election_id TEXT NOT NULL,
-
-    started_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    completed_at TIMESTAMPTZ,
-
-    status TEXT NOT NULL DEFAULT 'RUNNING',
-
-    findings_count INTEGER NOT NULL DEFAULT 0,
-
-    scope_level TEXT,
-
-    scope_id TEXT,
-
-    candidate_id TEXT,
-
-    position_id TEXT,
-
-    CONSTRAINT fk_audit_run_election
-        FOREIGN KEY (election_id)
-        REFERENCES elections(election_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT fk_audit_run_candidate
-        FOREIGN KEY (candidate_id, election_id)
-        REFERENCES candidates(candidate_id, election_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT fk_audit_run_position
-        FOREIGN KEY (position_id)
-        REFERENCES positions(position_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT audit_scope_level_check
-        CHECK (scope_level IS NULL OR scope_level IN (
-            'COUNTY', 'CONSTITUENCY', 'WARD', 'POLLING_STATION'
-        )),
-
-    CONSTRAINT audit_run_status_check
-        CHECK (
-            status IN (
-                'RUNNING',
-                'COMPLETED',
-                'FAILED'
-            )
-        ),
-
-    CONSTRAINT findings_count_non_negative
-        CHECK (findings_count >= 0),
-
-    CONSTRAINT completed_run_has_completion_time
-        CHECK (
-            status = 'RUNNING'
-            OR completed_at IS NOT NULL
-        )
-);
-
-
-/*
-===============================================================================
-12. AUDIT FINDINGS
-===============================================================================
-
-This table stores AUDIT OUTPUT.
-
-The audit engine writes findings here.
-
-It does NOT modify:
-
-    turnout_observations
-    ballot_accounting_observations
-    result_submissions
-
-The audit output uses actual_value and comparison_value with meaningful labels.
-
-Examples:
-    R001: Voter Turnout compared with Registered Voters.
-    R003: Ballots Accounted For compared with Voter Turnout.
-
-For an upper-bound rule:
-
-    actual_value <= comparison_value
-
-For equality or other rules where an upper bound does not apply:
-
-    comparison_value may be NULL.
-
-===============================================================================
-*/
-
-CREATE TABLE audit_findings (
-    audit_finding_id BIGINT
-        GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-
-    audit_run_id BIGINT NOT NULL,
-
-    election_id TEXT NOT NULL,
-
-    polling_station_id TEXT,
-
-    candidate_id TEXT,
-
-    position_id TEXT,
-
-    geography_level TEXT,
-
-    geography_id TEXT,
-
-    rule_code TEXT NOT NULL,
-
-    status TEXT NOT NULL,
-
-    actual_label TEXT NOT NULL DEFAULT 'Actual value',
-
-    actual_value INTEGER,
-
-    comparison_label TEXT NOT NULL DEFAULT 'Comparison value',
-
-    comparison_value INTEGER,
-
-    message TEXT NOT NULL,
-
-    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-
-    previous_hash TEXT,
-
-    current_hash TEXT NOT NULL,
-
-    CONSTRAINT fk_finding_audit_run
-        FOREIGN KEY (audit_run_id)
-        REFERENCES audit_runs(audit_run_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT fk_finding_election
-        FOREIGN KEY (election_id)
-        REFERENCES elections(election_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT fk_finding_station_election
-        FOREIGN KEY (polling_station_id, election_id)
-        REFERENCES polling_stations(
-            polling_station_id,
-            election_id
-        )
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT fk_finding_candidate_election
-        FOREIGN KEY (candidate_id, election_id)
-        REFERENCES candidates(candidate_id, election_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT fk_finding_position
-        FOREIGN KEY (position_id)
-        REFERENCES positions(position_id)
-        ON UPDATE CASCADE
-        ON DELETE RESTRICT,
-
-    CONSTRAINT audit_status_check
-        CHECK (
-            status IN (
-                'PASSED',
-                'FAILED',
-                'WARNING'
-            )
-        ),
-
-    CONSTRAINT actual_value_non_negative
-        CHECK (
-            actual_value IS NULL
-            OR actual_value >= 0
-        ),
-
-    CONSTRAINT comparison_value_non_negative
-        CHECK (
-            comparison_value IS NULL
-            OR comparison_value >= 0
-        ),
-
-    CONSTRAINT audit_findings_hash_algorithm_check CHECK (hash_algorithm = 'BLAKE3-256'),
-
-    CONSTRAINT current_hash_format
-        CHECK (
-            current_hash ~ '^[0-9a-f]{64}$'
-        ),
-
-    CONSTRAINT previous_hash_format
-        CHECK (
-            previous_hash IS NULL
-            OR previous_hash ~ '^[0-9a-f]{64}$'
-        )
-);
-
-
-CREATE TABLE audit_passed_results (
-    audit_passed_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    audit_finding_id BIGINT NOT NULL UNIQUE REFERENCES audit_findings(audit_finding_id),
-    audit_run_id BIGINT NOT NULL REFERENCES audit_runs(audit_run_id),
-    election_id TEXT NOT NULL REFERENCES elections(election_id),
-    candidate_id TEXT,
-    position_id TEXT,
-    geography_level TEXT,
-    geography_id TEXT,
-    polling_station_id TEXT,
-    rule_code TEXT NOT NULL,
-    message TEXT NOT NULL,
-    actual_label TEXT NOT NULL DEFAULT 'Actual value',
-    actual_value INTEGER,
-    comparison_label TEXT NOT NULL DEFAULT 'Comparison value',
-    comparison_value INTEGER,
-    recorded_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
-
-CREATE TABLE audit_failed_results (
-    audit_failed_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    audit_finding_id BIGINT NOT NULL UNIQUE REFERENCES audit_findings(audit_finding_id),
-    audit_run_id BIGINT NOT NULL REFERENCES audit_runs(audit_run_id),
-    election_id TEXT NOT NULL REFERENCES elections(election_id),
-    candidate_id TEXT,
-    position_id TEXT,
-    geography_level TEXT,
-    geography_id TEXT,
-    polling_station_id TEXT,
-    rule_code TEXT NOT NULL,
-    message TEXT NOT NULL,
-    actual_label TEXT NOT NULL DEFAULT 'Actual value',
-    actual_value INTEGER,
-    comparison_label TEXT NOT NULL DEFAULT 'Comparison value',
-    comparison_value INTEGER,
-    recorded_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
-
-CREATE TABLE source_comparisons (
-    source_comparison_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    audit_run_id BIGINT NOT NULL REFERENCES audit_runs(audit_run_id),
-    election_id TEXT NOT NULL REFERENCES elections(election_id),
-    published_document_id BIGINT NOT NULL REFERENCES source_documents(document_id),
-    derived_source_document_id BIGINT REFERENCES source_documents(document_id),
-    aggregation_level TEXT NOT NULL,
-    geography_id TEXT NOT NULL,
-    candidate_id TEXT,
-    position_id TEXT,
-    metric TEXT NOT NULL,
-    published_value INTEGER,
-    derived_value INTEGER,
-    difference INTEGER,
-    status TEXT NOT NULL,
-    compared_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
-
-CREATE TABLE audit_position_results (
-    audit_position_result_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    audit_run_id BIGINT NOT NULL REFERENCES audit_runs(audit_run_id),
-    election_id TEXT NOT NULL REFERENCES elections(election_id),
-    position_id TEXT NOT NULL REFERENCES positions(position_id),
-    passed_count INTEGER NOT NULL DEFAULT 0,
-    failed_count INTEGER NOT NULL DEFAULT 0,
-    warning_count INTEGER NOT NULL DEFAULT 0,
-    recorded_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE (audit_run_id, position_id)
-);
-
-
-CREATE INDEX idx_audit_failed_station ON audit_failed_results(election_id, polling_station_id);
-CREATE INDEX idx_audit_failed_geography ON audit_failed_results(election_id, geography_level, geography_id);
-CREATE INDEX idx_source_comparisons_run ON source_comparisons(audit_run_id);
-CREATE INDEX idx_audit_findings_candidate ON audit_findings(election_id, candidate_id);
-CREATE INDEX idx_audit_findings_geography ON audit_findings(election_id, geography_level, geography_id);
-
-
-/*
-===============================================================================
-13. INDEXES
-===============================================================================
-
-Indexes improve lookup and audit-engine performance.
-
-They do not modify source data.
-
-===============================================================================
-*/
-
-CREATE INDEX idx_constituencies_county
-    ON constituencies(county_id);
-
-
-CREATE INDEX idx_wards_constituency
-    ON wards(constituency_id);
-
-
-CREATE INDEX idx_registration_centres_ward
-    ON registration_centres(ward_id);
-
-
-CREATE INDEX idx_polling_stations_election
-    ON polling_stations(election_id);
-
-CREATE INDEX idx_polling_station_turnout_interval
-    ON polling_stations(election_id, polling_station_id, turnout_reporting_interval_minutes);
-
-
-CREATE INDEX idx_polling_stations_registration_centre
-    ON polling_stations(registration_centre_id);
-
-
-CREATE INDEX idx_polling_stations_election_centre
-    ON polling_stations(election_id, registration_centre_id);
-
-
-CREATE INDEX idx_turnout_election_station
-    ON turnout_observations(
-        election_id,
-        polling_station_id
-    );
-
-
-CREATE INDEX idx_turnout_source_document
-    ON turnout_observations(source_document_id);
-
-
-CREATE INDEX idx_ballot_election_station
-    ON ballot_accounting_observations(
-        election_id,
-        polling_station_id
-    );
-
-
-CREATE INDEX idx_ballot_source_document
-    ON ballot_accounting_observations(source_document_id);
-
-
-CREATE INDEX idx_results_election_station
-    ON result_submissions(
-        election_id,
-        polling_station_id
-    );
-
-
-CREATE INDEX idx_results_candidate
-    ON result_submissions(candidate_id);
-
-
-CREATE INDEX idx_results_position
-    ON result_submissions(position_id);
-
-
-CREATE INDEX idx_results_source_document
-    ON result_submissions(source_document_id);
-
-
-CREATE INDEX idx_results_submission_hash
-    ON result_submissions(submission_hash);
-
-
-CREATE INDEX idx_audit_runs_election
-    ON audit_runs(election_id);
-
-
-CREATE INDEX idx_audit_findings_run
-    ON audit_findings(audit_run_id);
-
-
-CREATE INDEX idx_audit_findings_election
-    ON audit_findings(election_id);
-
-
-CREATE INDEX idx_audit_findings_station
-    ON audit_findings(
-        election_id,
-        polling_station_id
-    );
-
-
-/*
-===============================================================================
-14. FINAL SCHEMA VERIFICATION
-===============================================================================
-
-After successfully executing this schema, run:
-
-    SELECT table_name
-    FROM information_schema.tables
-    WHERE table_schema = 'public'
-      AND table_type = 'BASE TABLE'
-    ORDER BY table_name;
-
-Expected tables:
-
-    audit_findings
-    audit_failed_results
-    audit_passed_results
-    audit_position_results
-    audit_runs
-    ballot_accounting_observations
-    candidates
-    positions
-    constituencies
-    counties
-    elections
-    polling_stations
-    registration_centres
-    result_submissions
-    source_documents
-    sources
-    source_comparisons
-    source_submissions
-    submission_validation_results
-    published_aggregate_totals
-    registered_voter_observations
-    turnout_observations
-    wards
-
-===============================================================================
-*/
-
-
-/*
-===============================================================================
-15. FOREIGN KEY VERIFICATION
-===============================================================================
-
-Run this after creating the schema:
-
-    SELECT
-        tc.table_name,
-        kcu.column_name,
-        ccu.table_name AS referenced_table,
-        ccu.column_name AS referenced_column
-    FROM information_schema.table_constraints AS tc
-    JOIN information_schema.key_column_usage AS kcu
-        ON tc.constraint_name = kcu.constraint_name
-       AND tc.table_schema = kcu.table_schema
-    JOIN information_schema.constraint_column_usage AS ccu
-        ON ccu.constraint_name = tc.constraint_name
-       AND ccu.table_schema = tc.table_schema
-    WHERE tc.constraint_type = 'FOREIGN KEY'
-      AND tc.table_schema = 'public'
-    ORDER BY tc.table_name, kcu.column_name;
-
-===============================================================================
-*/
-
-
-/*
-===============================================================================
-END OF ETVS POSTGRESQL SCHEMA
-===============================================================================
-*/
-
-
-
-/* Current source-entry surface. Reference and derived data are not direct input. */
-CREATE TABLE etvs_input_scope (
-    input_area TEXT PRIMARY KEY,
-    enabled BOOLEAN NOT NULL DEFAULT TRUE,
-    description TEXT NOT NULL
-);
-
-INSERT INTO etvs_input_scope(input_area,enabled,description) VALUES
-('POLLING_STATION_DETAILS',TRUE,'Election-specific polling-station configuration and registered-voter baseline.'),
-('TURNOUT_OBSERVATION',TRUE,'Observed voters cast/turnout at a polling station; variable input.'),
-('RESULT_SUBMISSION',TRUE,'Candidate result values by polling station, contest and version.'),
-('BALLOT_ACCOUNTING',TRUE,'Contest-level ballot accounting linked to the station turnout observation.'),
-('GEOGRAPHY_REFERENCE',FALSE,'Counties, constituencies and wards are controlled reference data.'),
-('CANDIDATE_REFERENCE',FALSE,'Candidates and positions are controlled reference data.'),
-('BALLOT_SECURITY_REFERENCE',FALSE,'Ballot specifications, stock and security metadata are controlled reference data.'),
-('AUDIT_RESULTS',FALSE,'Audit findings are generated by ETVS and are not direct user input.')
-ON CONFLICT(input_area) DO NOTHING;
+-- Stable reporting views used by the dashboard.
+CREATE OR REPLACE VIEW v_audit_station_findings AS
+SELECT f.audit_finding_id,f.audit_run_id,f.election_id,f.polling_station_id,
+       ps.polling_station_code,f.position_id,f.rule_code,f.status,
+       f.actual_label,f.actual_value,f.comparison_label,f.comparison_value,
+       f.message,f.created_at
+FROM audit_findings f
+LEFT JOIN polling_stations ps ON ps.polling_station_id=f.polling_station_id
+WHERE f.polling_station_id IS NOT NULL;
+
+CREATE OR REPLACE VIEW v_audit_station_summary AS
+SELECT audit_run_id,election_id,polling_station_id,
+       COUNT(*)::INTEGER AS rules_checked,
+       COUNT(*) FILTER(WHERE status='PASSED')::INTEGER AS passed_count,
+       COUNT(*) FILTER(WHERE status='FAILED')::INTEGER AS failed_count,
+       COUNT(*) FILTER(WHERE status='WARNING')::INTEGER AS warning_count,
+       CASE WHEN COUNT(*) FILTER(WHERE status='FAILED')>0 THEN 'FAILED'
+            WHEN COUNT(*) FILTER(WHERE status='WARNING')>0 THEN 'WARNING'
+            ELSE 'PASSED' END AS station_status
+FROM audit_findings
+WHERE polling_station_id IS NOT NULL
+GROUP BY audit_run_id,election_id,polling_station_id;
+
+COMMIT;
