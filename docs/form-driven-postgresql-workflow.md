@@ -77,3 +77,12 @@ PostgreSQL records -> DBeaver visibility -> audit engine**
 
 No source-entry data should be inserted into `seed.py` merely to make it appear
 in DBeaver.
+
+
+## Cross-file consistency checks
+
+The result-entry form and `audit_engine.py` use the same canonical BLAKE3-256 result fingerprint payload: `RESULT | election_id | polling_station_id | candidate_id | result_version | votes`. This is what audit rule R010 verifies.
+
+The polling-station form reuses an existing registration centre when the same ward and registration-centre name are selected. This preserves the schema relationship where one registration centre can contain multiple polling stations.
+
+For the complete reference-data validation, run `python verify_project.py KE-PRES-2027 --strict-reference-data` after loading the 47/290/1450 geography and the prison/diaspora reference migration.
