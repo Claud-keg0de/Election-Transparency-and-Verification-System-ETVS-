@@ -78,6 +78,15 @@ SELECT COUNT(*) AS base_tables
 FROM information_schema.tables
 WHERE table_schema='public' AND table_type='BASE TABLE';
 SELECT COUNT(*) AS etvs_regions FROM etvs_regions;
+SELECT COUNT(*) AS special_areas FROM special_registration_areas;
+SELECT COUNT(*) AS special_registration_centres FROM special_registration_centres;
+SELECT COUNT(*) AS special_polling_stations FROM special_polling_stations;
+SELECT COALESCE(SUM(s.registered_voters),0) AS special_prison_registered_voters
+FROM special_polling_stations s JOIN special_registration_centres c ON c.special_registration_centre_id=s.special_registration_centre_id JOIN special_registration_areas a ON a.special_area_id=c.special_area_id
+WHERE a.special_area_type='PRISONS' AND s.election_reference_year=2022;
+SELECT COALESCE(SUM(s.registered_voters),0) AS special_diaspora_registered_voters
+FROM special_polling_stations s JOIN special_registration_centres c ON c.special_registration_centre_id=s.special_registration_centre_id JOIN special_registration_areas a ON a.special_area_id=c.special_area_id
+WHERE a.special_area_type='DIASPORA' AND s.election_reference_year=2022;
 SELECT COUNT(*) AS required_tables
 FROM information_schema.tables
 WHERE table_schema='public'
@@ -91,7 +100,8 @@ WHERE table_schema='public'
     'source_submissions','submission_validation_results',
     'published_aggregate_totals','audit_runs','audit_findings',
     'audit_passed_results','audit_failed_results','source_comparisons',
-    'audit_position_results','sources','source_documents','etvs_input_scope'
+    'audit_position_results','sources','source_documents','etvs_input_scope',
+    'special_registration_areas','special_registration_centres','special_polling_stations'
   );
 SELECT COUNT(*) AS required_foreign_keys
 FROM information_schema.table_constraints
