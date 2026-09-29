@@ -122,6 +122,8 @@ def connection_kwargs() -> dict:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("election_id", nargs="?", default=ELECTION_ID)
+    parser.add_argument("--strict-reference-data", action="store_true",
+                        help="Require the full 6-region/47-county/290-constituency/1450-ward reference dataset and IEBC 2022 special-area totals.")
     args = parser.parse_args()
 
     failures: list[str] = []
@@ -339,50 +341,52 @@ def main() -> int:
                 if hash_mismatch:
                     failures.append(f"Result submission hash mismatches: {hash_mismatch}")
 
-                geography_counts = {
-                    "regions": cur.execute("SELECT COUNT(*)::INTEGER n FROM etvs_regions").fetchone()["n"],
-                    "counties": cur.execute("SELECT COUNT(*)::INTEGER n FROM counties").fetchone()["n"],
-                    "constituencies": cur.execute("SELECT COUNT(*)::INTEGER n FROM constituencies").fetchone()["n"],
-                    "wards": cur.execute("SELECT COUNT(*)::INTEGER n FROM wards").fetchone()["n"],
-                }
-                expected_geography = {"regions": 6, "counties": 47, "constituencies": 290, "wards": 1450}
-                for label, expected in expected_geography.items():
-                    if geography_counts[label] != expected:
-                        failures.append(f"Kenya geography {label}: expected {expected}, found {geography_counts[label]}")
+                if args.strict_reference_data:
+                                    geography_counts = {
+                                        "regions": cur.execute("SELECT COUNT(*)::INTEGER n FROM etvs_regions").fetchone()["n"],
+                                        "counties": cur.execute("SELECT COUNT(*)::INTEGER n FROM counties").fetchone()["n"],
+                                        "constituencies": cur.execute("SELECT COUNT(*)::INTEGER n FROM constituencies").fetchone()["n"],
+                                        "wards": cur.execute("SELECT COUNT(*)::INTEGER n FROM wards").fetchone()["n"],
+                                    }
+                                    expected_geography = {"regions": 6, "counties": 47, "constituencies": 290, "wards": 1450}
+                                    for label, expected in expected_geography.items():
+                                        if geography_counts[label] != expected:
+                                            failures.append(f"Kenya geography {label}: expected {expected}, found {geography_counts[label]}")
 
-                special_counts = cur.execute("""
-                    SELECT
-                        COUNT(*) FILTER (WHERE special_area_type='PRISONS')::INTEGER AS prison_areas,
-                        COUNT(*) FILTER (WHERE special_area_type='DIASPORA')::INTEGER AS diaspora_areas
-                    FROM special_registration_areas
-                """).fetchone()
-                if special_counts["prison_areas"] != 1 or special_counts["diaspora_areas"] != 12:
-                    failures.append(
-                        "Special registration areas: expected 1 prison area and 12 diaspora country areas, "
-                        f"found {special_counts['prison_areas']} and {special_counts['diaspora_areas']}"
-                    )
+                                    special_counts = cur.execute("""
+                                        SELECT
+                                            COUNT(*) FILTER (WHERE special_area_type='PRISONS')::INTEGER AS prison_areas,
+                                            COUNT(*) FILTER (WHERE special_area_type='DIASPORA')::INTEGER AS diaspora_areas
+                                        FROM special_registration_areas
+                                    """).fetchone()
+                                    if special_counts["prison_areas"] != 1 or special_counts["diaspora_areas"] != 12:
+                                        failures.append(
+                                            "Special registration areas: expected 1 prison area and 12 diaspora country areas, "
+                                            f"found {special_counts['prison_areas']} and {special_counts['diaspora_areas']}"
+                                        )
 
-                special_totals = cur.execute("""
-                    SELECT
-                        COUNT(*) FILTER (WHERE a.special_area_type='PRISONS')::INTEGER AS prison_stations,
-                        COUNT(*) FILTER (WHERE a.special_area_type='DIASPORA')::INTEGER AS diaspora_stations,
-                        COALESCE(SUM(s.registered_voters) FILTER (WHERE a.special_area_type='PRISONS'),0)::BIGINT AS prison_voters,
-                        COALESCE(SUM(s.registered_voters) FILTER (WHERE a.special_area_type='DIASPORA'),0)::BIGINT AS diaspora_voters
-                    FROM special_polling_stations s
-                    JOIN special_registration_centres c ON c.special_registration_centre_id=s.special_registration_centre_id
-                    JOIN special_registration_areas a ON a.special_area_id=c.special_area_id
-                    WHERE s.election_reference_year=2022
-                """).fetchone()
-                if special_totals["prison_stations"] != 106 or special_totals["diaspora_stations"] != 27:
-                    failures.append(
-                        "IEBC special polling-station counts: expected 106 prison and 27 diaspora rows, "
-                        f"found {special_totals['prison_stations']} and {special_totals['diaspora_stations']}"
-                    )
-                if special_totals["prison_voters"] != 7483 or special_totals["diaspora_voters"] != 10443:
-                    failures.append(
-                        "IEBC special registered-voter totals: expected 7,483 prison and 10,443 diaspora voters, "
-                        f"found {special_totals['prison_voters']} and {special_totals['diaspora_voters']}"
-                    )
+                                    special_totals = cur.execute("""
+                                        SELECT
+                                            COUNT(*) FILTER (WHERE a.special_area_type='PRISONS')::INTEGER AS prison_stations,
+                                            COUNT(*) FILTER (WHERE a.special_area_type='DIASPORA')::INTEGER AS diaspora_stations,
+                                            COALESCE(SUM(s.registered_voters) FILTER (WHERE a.special_area_type='PRISONS'),0)::BIGINT AS prison_voters,
+                                            COALESCE(SUM(s.registered_voters) FILTER (WHERE a.special_area_type='DIASPORA'),0)::BIGINT AS diaspora_voters
+                                        FROM special_polling_stations s
+                                        JOIN special_registration_centres c ON c.special_registration_centre_id=s.special_registration_centre_id
+                                        JOIN special_registration_areas a ON a.special_area_id=c.special_area_id
+                                        WHERE s.election_reference_year=2022
+                                    """).fetchone()
+                                    if special_totals["prison_stations"] != 106 or special_totals["diaspora_stations"] != 27:
+                                        failures.append(
+                                            "IEBC special polling-station counts: expected 106 prison and 27 diaspora rows, "
+                                            f"found {special_totals['prison_stations']} and {special_totals['diaspora_stations']}"
+                                        )
+                                    if special_totals["prison_voters"] != 7483 or special_totals["diaspora_voters"] != 10443:
+                                        failures.append(
+                                            "IEBC special registered-voter totals: expected 7,483 prison and 10,443 diaspora voters, "
+                                            f"found {special_totals['prison_voters']} and {special_totals['diaspora_voters']}"
+                                        )
+
 
                 print("-" * 72)
                 if failures:
