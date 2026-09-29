@@ -372,7 +372,7 @@ def reset_sample(cur) -> None:
 
 def seed_master_data(cur) -> None:
     cur.execute("INSERT INTO elections(election_id,election_name,election_date,status) VALUES(%s,'ETVS Sample Election 2027','2027-08-10','ACTIVE') ON CONFLICT DO NOTHING",(ELECTION_ID,))
-    cur.execute("INSERT INTO counties(county_id,county_name) VALUES('COUNTY001','Sample County') ON CONFLICT DO NOTHING")
+    cur.execute("INSERT INTO counties(county_id,county_name,region_id) VALUES('COUNTY001','Sample County','REG-05') ON CONFLICT DO NOTHING")
     for cid,name in (("CON001","Greenfield Constituency"),("CON002","Riverdale Constituency")):
         cur.execute("INSERT INTO constituencies(constituency_id,constituency_name,county_id) VALUES(%s,%s,'COUNTY001') ON CONFLICT DO NOTHING",(cid,name))
     wards=(("W001","Greenfield Central","CON001"),("W002","Greenfield East","CON001"),("W003","Riverdale Central","CON002"),("W004","Riverdale East","CON002"))
