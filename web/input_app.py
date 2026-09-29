@@ -36,6 +36,10 @@ def db():
                            password=os.getenv("ETVS_DB_PASSWORD",""),row_factory=dict_row)
 def now(): return datetime.now(timezone.utc)
 def hash_input(*parts): return blake3.blake3("|".join("" if p is None else str(p) for p in parts).encode()).hexdigest()
+def result_submission_hash(election_id, station_id, candidate_id, version, votes):
+    # Must remain identical to audit_engine.result_hash() so R010 can verify
+    # every result submitted through the form.
+    return hash_input("RESULT", election_id, station_id, candidate_id, version, votes)
 def nonneg(name,value):
     if value is None or value.strip()=="": raise ValueError(f"{name} is required.")
     n=int(value)
@@ -74,10 +78,15 @@ def new_station():
                 interval=nonneg("Turnout interval",request.form.get("turnout_interval_minutes"))
                 if not sid or not code or not centre: raise ValueError("Station ID, station code and registration-centre name are required.")
                 if not 1<=interval<=1440: raise ValueError("Turnout interval must be 1-1440 minutes.")
-                rcid="RC-"+sid
-                q.execute("""INSERT INTO registration_centres(registration_centre_id,registration_centre_name,ward_id)
-                             VALUES(%s,%s,%s) ON CONFLICT(registration_centre_id) DO UPDATE
-                             SET registration_centre_name=EXCLUDED.registration_centre_name,ward_id=EXCLUDED.ward_id""",(rcid,centre,wid))
+                existing_rc=q.execute("""SELECT registration_centre_id
+                                            FROM registration_centres
+                                           WHERE ward_id=%s AND registration_centre_name=%s""",(wid,centre)).fetchone()
+                if existing_rc:
+                    rcid=existing_rc["registration_centre_id"]
+                else:
+                    rcid="RC-"+blake3.blake3(f"{wid}|{centre.strip().casefold()}".encode()).hexdigest()[:16].upper()
+                    q.execute("""INSERT INTO registration_centres(registration_centre_id,registration_centre_name,ward_id)
+                                 VALUES(%s,%s,%s)""",(rcid,centre,wid))
                 q.execute("""INSERT INTO polling_stations(polling_station_id,election_id,registration_centre_id,polling_station_code,
                              registered_voters,turnout_reporting_interval_minutes) VALUES(%s,%s,%s,%s,%s,%s)""",
                           (sid,eid,rcid,code,reg,interval))
@@ -167,7 +176,7 @@ def contest():
                 for cid,vote in votes.items():
                     rv=q.execute("""SELECT COALESCE(MAX(result_version),0)+1 AS v FROM result_submissions
                                     WHERE election_id=%s AND polling_station_id=%s AND candidate_id=%s""",(eid,sid,cid)).fetchone()["v"]
-                    rh=hash_input("RESULT",eid,sid,cid,pid,rv,vote,t.isoformat())
+                    rh=result_submission_hash(eid,sid,cid,rv,vote)
                     q.execute("""INSERT INTO result_submissions(election_id,polling_station_id,candidate_id,result_version,votes,position_id,
                                  submission_hash,submitted_at,observed_at) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
                               (eid,sid,cid,rv,vote,pid,rh,t,t))
