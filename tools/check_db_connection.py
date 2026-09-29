@@ -55,7 +55,7 @@ def main() -> int:
                 counts = cur.fetchone()
         print("  STATUS: CONNECTED")
         print(f"  database={dbname} user={user}")
-        print(f"  required public tables present={table_count}/13")
+        print(f"  required public tables present={table_count}/14")
         print(f"  geography: counties={counts[0]} constituencies={counts[1]} wards={counts[2]}")
         print(f"  operational data: stations={counts[3]} turnout={counts[4]} results={counts[5]} accounting={counts[6]}")
         print(f"  server={version}")
