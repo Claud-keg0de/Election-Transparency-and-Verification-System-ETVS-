@@ -134,12 +134,13 @@ CREATE TABLE candidates (
     election_id TEXT NOT NULL REFERENCES elections(election_id) ON UPDATE CASCADE ON DELETE RESTRICT,
     candidate_name TEXT NOT NULL,
     office TEXT NOT NULL,
-    position_id TEXT REFERENCES positions(position_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+    position_id TEXT,
     party_affiliation_type TEXT,
     party_id TEXT,
     symbol_type TEXT,
     symbol_reference TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT fk_candidate_position FOREIGN KEY(position_id) REFERENCES positions(position_id) ON UPDATE CASCADE ON DELETE RESTRICT,
     CONSTRAINT unique_candidate_per_election UNIQUE(election_id,candidate_name,office),
     CONSTRAINT unique_candidate_election_pair UNIQUE(candidate_id,election_id),
     CONSTRAINT candidate_party_symbol_check CHECK (
@@ -161,7 +162,7 @@ CREATE TABLE source_submissions (
     source_submission_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     election_id TEXT NOT NULL REFERENCES elections(election_id) ON UPDATE CASCADE ON DELETE RESTRICT,
     source_document_id BIGINT NOT NULL REFERENCES source_documents(document_id) ON UPDATE CASCADE ON DELETE RESTRICT,
-    position_id TEXT REFERENCES positions(position_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+    position_id TEXT,
     submission_level TEXT NOT NULL CHECK (submission_level IN ('NATIONAL','COUNTY','CONSTITUENCY','WARD','POLLING_STATION')),
     geography_id TEXT NOT NULL,
     candidate_id TEXT,
@@ -197,6 +198,8 @@ CREATE TABLE published_aggregate_totals (
     metric TEXT NOT NULL,
     reported_value INTEGER NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT fk_published_aggregate_position
+        FOREIGN KEY(position_id) REFERENCES positions(position_id) ON UPDATE CASCADE ON DELETE RESTRICT,
     CONSTRAINT fk_published_aggregate_candidate
         FOREIGN KEY(candidate_id,election_id) REFERENCES candidates(candidate_id,election_id)
         ON UPDATE CASCADE ON DELETE RESTRICT,
@@ -273,7 +276,7 @@ CREATE TABLE ballot_units (
     ballot_unit_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     election_id TEXT NOT NULL REFERENCES elections(election_id) ON UPDATE CASCADE ON DELETE RESTRICT,
     polling_station_id TEXT NOT NULL,
-    position_id TEXT NOT NULL REFERENCES positions(position_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+    position_id TEXT NOT NULL,
     ballot_batch_id BIGINT NOT NULL,
     ballot_serial_number TEXT NOT NULL,
     counterfoil_serial_number TEXT NOT NULL,
@@ -284,6 +287,7 @@ CREATE TABLE ballot_units (
     source_document_id BIGINT REFERENCES source_documents(document_id) ON UPDATE CASCADE ON DELETE RESTRICT,
     source_reference TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT fk_ballot_unit_position FOREIGN KEY(position_id) REFERENCES positions(position_id) ON UPDATE CASCADE ON DELETE RESTRICT,
     CONSTRAINT fk_ballot_unit_station_election
         FOREIGN KEY(polling_station_id,election_id)
         REFERENCES polling_stations(polling_station_id,election_id)
@@ -385,12 +389,14 @@ CREATE TABLE ballot_accounting_observations (
     valid_votes INTEGER NOT NULL CHECK(valid_votes>=0),
     rejected_votes INTEGER NOT NULL CHECK(rejected_votes>=0),
     spoilt_ballots INTEGER NOT NULL CHECK(spoilt_ballots>=0),
-    turnout_observation_id BIGINT REFERENCES turnout_observations(turnout_observation_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+    turnout_observation_id BIGINT,
     observed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     source_document_id BIGINT REFERENCES source_documents(document_id) ON UPDATE CASCADE ON DELETE RESTRICT,
     source_reference TEXT,
     input_hash TEXT,
     hash_algorithm TEXT NOT NULL DEFAULT 'BLAKE3-256',
+    CONSTRAINT fk_ballot_position FOREIGN KEY(position_id) REFERENCES positions(position_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+    CONSTRAINT fk_ballot_turnout_observation FOREIGN KEY(turnout_observation_id) REFERENCES turnout_observations(turnout_observation_id) ON UPDATE CASCADE ON DELETE RESTRICT,
     CONSTRAINT fk_ballot_station_election
         FOREIGN KEY(polling_station_id,election_id)
         REFERENCES polling_stations(polling_station_id,election_id)
@@ -445,7 +451,8 @@ CREATE TABLE audit_runs (
     scope_level TEXT,
     scope_id TEXT,
     candidate_id TEXT,
-    position_id TEXT REFERENCES positions(position_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+    position_id TEXT,
+    CONSTRAINT fk_audit_run_position FOREIGN KEY(position_id) REFERENCES positions(position_id) ON UPDATE CASCADE ON DELETE RESTRICT,
     CONSTRAINT fk_audit_run_candidate
         FOREIGN KEY(candidate_id,election_id)
         REFERENCES candidates(candidate_id,election_id)
@@ -460,7 +467,7 @@ CREATE TABLE audit_findings (
     election_id TEXT NOT NULL REFERENCES elections(election_id) ON UPDATE CASCADE ON DELETE RESTRICT,
     polling_station_id TEXT,
     candidate_id TEXT,
-    position_id TEXT REFERENCES positions(position_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+    position_id TEXT,
     geography_level TEXT,
     geography_id TEXT,
     rule_code TEXT NOT NULL,
@@ -474,6 +481,7 @@ CREATE TABLE audit_findings (
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     previous_hash TEXT,
     current_hash TEXT NOT NULL,
+    CONSTRAINT fk_finding_position FOREIGN KEY(position_id) REFERENCES positions(position_id) ON UPDATE CASCADE ON DELETE RESTRICT,
     CONSTRAINT fk_finding_station_election
         FOREIGN KEY(polling_station_id,election_id)
         REFERENCES polling_stations(polling_station_id,election_id)
