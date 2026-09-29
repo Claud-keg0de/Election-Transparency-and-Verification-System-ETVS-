@@ -103,17 +103,37 @@ def turnout():
                 st=q.execute("SELECT * FROM polling_stations WHERE polling_station_id=%s",(sid,)).fetchone()
                 if not st: raise ValueError("Polling station does not exist.")
                 if value>st["registered_voters"]: raise ValueError("Turnout/votes cast cannot exceed registered voters.")
+                previous=q.execute("SELECT observed_at FROM turnout_observations WHERE election_id=%s AND polling_station_id=%s ORDER BY observation_version DESC LIMIT 1",
+                                   (st["election_id"],sid)).fetchone()
+                t=now()
+                if previous is not None:
+                    elapsed=(t-previous["observed_at"]).total_seconds()/60
+                    if elapsed < st["turnout_reporting_interval_minutes"]:
+                        raise ValueError(f"Next turnout observation is not due yet. The station interval is {st['turnout_reporting_interval_minutes']} minutes; only {elapsed:.1f} minutes have elapsed.")
                 v=q.execute("SELECT COALESCE(MAX(observation_version),0)+1 AS v FROM turnout_observations WHERE election_id=%s AND polling_station_id=%s",
                             (st["election_id"],sid)).fetchone()["v"]
-                t=now(); h=hash_input("TURNOUT",st["election_id"],sid,v,value,t.isoformat())
+                h=hash_input("TURNOUT",st["election_id"],sid,v,value,t.isoformat())
                 q.execute("""INSERT INTO turnout_observations(election_id,polling_station_id,observation_version,voters_turnout,observed_at,input_hash)
                              VALUES(%s,%s,%s,%s,%s,%s)""",(st["election_id"],sid,v,value,t,h))
                 c.commit(); message=f"Turnout {value} saved for {sid}."
             except Exception as exc: c.rollback(); error=True; message=str(exc)
-    body=render_template_string("""<section><h2>Turnout / votes cast</h2><p class="small">Turnout is a variable observed input; ETVS never derives it from registered voters.</p>
+    body=render_template_string("""<section><h2>Turnout / votes cast</h2><p class="small">Turnout is a variable observed input recorded at the station's configured interval; ETVS never derives it from registered voters.</p>
     <form method="post"><label>Polling station</label><select name="polling_station_id">{% for s in stations %}<option value="{{s.polling_station_id}}">{{s.polling_station_code}} — registered {{s.registered_voters}}</option>{% endfor %}</select>
     <label>Voters who cast a ballot (turnout)</label><input name="voters_turnout" type="number" min="0" required><button type="submit">Save turnout</button></form></section>""",stations=stations)
     return render(body,message,error)
+
+@app.get("/health/db")
+def health_db():
+    try:
+        with db() as c, c.cursor() as q:
+            q.execute("SELECT current_database(), current_user")
+            row = q.fetchone()
+            database, user = row["current_database"], row["current_user"]
+            q.execute("SELECT COUNT(*) AS n FROM information_schema.tables WHERE table_schema='public'")
+            tables = q.fetchone()["n"]
+        return {"status":"connected","database":database,"user":user,"public_tables":tables}, 200
+    except Exception as exc:
+        return {"status":"error","message":str(exc)}, 503
 
 @app.route("/contest",methods=["GET","POST"])
 def contest():
