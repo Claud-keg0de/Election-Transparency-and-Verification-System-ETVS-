@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import blake3
 from getpass import getpass
 
 import psycopg
@@ -23,7 +24,7 @@ REQUIRED_COLUMNS = {
     "result_submissions": {
         "result_submission_id", "election_id", "polling_station_id",
         "candidate_id", "result_version", "votes", "position_id",
-        "submission_hash", "source_document_id",
+        "submission_hash", "hash_algorithm", "source_document_id",
     },
     "published_aggregate_totals": {
         "published_aggregate_id", "election_id", "source_document_id",
@@ -36,7 +37,7 @@ REQUIRED_COLUMNS = {
     },
     "turnout_observations": {
         "turnout_observation_id", "election_id", "polling_station_id",
-        "observation_version", "voters_turnout", "source_document_id",
+        "observation_version", "voters_turnout", "hash_algorithm", "source_document_id",
     },
     "registered_voter_observations": {
         "registered_voter_observation_id", "election_id", "polling_station_id",
@@ -46,7 +47,7 @@ REQUIRED_COLUMNS = {
         "ballot_accounting_observation_id", "election_id",
         "polling_station_id", "position_id", "observation_version",
         "valid_votes", "rejected_votes", "spoilt_ballots",
-        "turnout_observation_id", "source_document_id",
+        "turnout_observation_id", "hash_algorithm", "source_document_id",
     },
     "ballot_specifications": {
         "ballot_specification_id", "election_id", "position_id",
@@ -315,10 +316,73 @@ def main() -> int:
                     SELECT COUNT(*) AS n
                     FROM result_submissions
                     WHERE election_id = %s
-                      AND submission_hash IS NULL
+                      AND (submission_hash IS NULL OR hash_algorithm <> 'BLAKE3-256')
                 """,(args.election_id,)).fetchone()["n"]
                 if invalid_hash:
-                    failures.append(f"Result submissions without hashes: {invalid_hash}")
+                    failures.append(f"Result submissions without valid BLAKE3 hashes: {invalid_hash}")
+
+                hash_mismatch = 0
+                result_rows = cur.execute("""
+                    SELECT polling_station_id,candidate_id,result_version,votes,submission_hash
+                    FROM result_submissions
+                    WHERE election_id=%s
+                """,(args.election_id,)).fetchall()
+                for row in result_rows:
+                    expected = blake3.blake3(
+                        "|".join(str(x) for x in (
+                            "RESULT", args.election_id, row["polling_station_id"],
+                            row["candidate_id"], row["result_version"], row["votes"]
+                        )).encode()
+                    ).hexdigest()
+                    if row["submission_hash"] != expected:
+                        hash_mismatch += 1
+                if hash_mismatch:
+                    failures.append(f"Result submission hash mismatches: {hash_mismatch}")
+
+                geography_counts = {
+                    "regions": cur.execute("SELECT COUNT(*)::INTEGER n FROM etvs_regions").fetchone()["n"],
+                    "counties": cur.execute("SELECT COUNT(*)::INTEGER n FROM counties").fetchone()["n"],
+                    "constituencies": cur.execute("SELECT COUNT(*)::INTEGER n FROM constituencies").fetchone()["n"],
+                    "wards": cur.execute("SELECT COUNT(*)::INTEGER n FROM wards").fetchone()["n"],
+                }
+                expected_geography = {"regions": 6, "counties": 47, "constituencies": 290, "wards": 1450}
+                for label, expected in expected_geography.items():
+                    if geography_counts[label] != expected:
+                        failures.append(f"Kenya geography {label}: expected {expected}, found {geography_counts[label]}")
+
+                special_counts = cur.execute("""
+                    SELECT
+                        COUNT(*) FILTER (WHERE special_area_type='PRISONS')::INTEGER AS prison_areas,
+                        COUNT(*) FILTER (WHERE special_area_type='DIASPORA')::INTEGER AS diaspora_areas
+                    FROM special_registration_areas
+                """).fetchone()
+                if special_counts["prison_areas"] != 1 or special_counts["diaspora_areas"] != 12:
+                    failures.append(
+                        "Special registration areas: expected 1 prison area and 12 diaspora country areas, "
+                        f"found {special_counts['prison_areas']} and {special_counts['diaspora_areas']}"
+                    )
+
+                special_totals = cur.execute("""
+                    SELECT
+                        COUNT(*) FILTER (WHERE a.special_area_type='PRISONS')::INTEGER AS prison_stations,
+                        COUNT(*) FILTER (WHERE a.special_area_type='DIASPORA')::INTEGER AS diaspora_stations,
+                        COALESCE(SUM(s.registered_voters) FILTER (WHERE a.special_area_type='PRISONS'),0)::BIGINT AS prison_voters,
+                        COALESCE(SUM(s.registered_voters) FILTER (WHERE a.special_area_type='DIASPORA'),0)::BIGINT AS diaspora_voters
+                    FROM special_polling_stations s
+                    JOIN special_registration_centres c ON c.special_registration_centre_id=s.special_registration_centre_id
+                    JOIN special_registration_areas a ON a.special_area_id=c.special_area_id
+                    WHERE s.election_reference_year=2022
+                """).fetchone()
+                if special_totals["prison_stations"] != 106 or special_totals["diaspora_stations"] != 27:
+                    failures.append(
+                        "IEBC special polling-station counts: expected 106 prison and 27 diaspora rows, "
+                        f"found {special_totals['prison_stations']} and {special_totals['diaspora_stations']}"
+                    )
+                if special_totals["prison_voters"] != 7483 or special_totals["diaspora_voters"] != 10443:
+                    failures.append(
+                        "IEBC special registered-voter totals: expected 7,483 prison and 10,443 diaspora voters, "
+                        f"found {special_totals['prison_voters']} and {special_totals['diaspora_voters']}"
+                    )
 
                 print("-" * 72)
                 if failures:
@@ -330,7 +394,7 @@ def main() -> int:
                 print("SCHEMA CONTRACT: PASS")
                 print("POSITION RELATIONSHIPS: PASS")
                 print("RESULT/CANDIDATE POSITION ALIGNMENT: PASS")
-                print("RESULT SUBMISSION HASH PRESENCE: PASS")
+                print("RESULT SUBMISSION BLAKE3 CONTRACT: PASS")
                 print("BALLOT/COUNTERFOIL SERIAL CONTRACT: PASS")
                 print("BALLOT SERIAL RANGE CONTRACT: PASS")
                 print("CONSISTENCY: PASS")
