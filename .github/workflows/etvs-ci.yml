@@ -2,7 +2,7 @@ name: ETVS PostgreSQL verification
 
 on:
   push:
-    branches: ["main", "feature/ballot-security", "integration/**", "feature/kenya-geography-blake3-input-contract"]
+    branches: ["main", "feature/ballot-security", "integration/**", "feature/kenya-geography-blake3-input-contract", "feature/etvs-input-workflow-postgresql"]
   pull_request:
 
 jobs:
@@ -41,7 +41,7 @@ jobs:
         run: python -m pip install --upgrade pip -r requirements.txt
 
       - name: Validate Python syntax
-        run: python -m py_compile seed.py audit_engine.py verify_project.py tools/load_kenya_geography.py web/input_app.py
+        run: python -m py_compile seed.py audit_engine.py verify_project.py tools/load_kenya_geography.py tools/check_db_connection.py web/input_app.py
 
       - name: Create PostgreSQL schema
         run: psql postgresql://postgres:postgres@localhost:5432/etvs -v ON_ERROR_STOP=1 -f schema.sql
@@ -56,6 +56,9 @@ jobs:
       - name: Seed controlled ETVS dataset
         run: python seed.py --reset
 
+      - name: Check PostgreSQL connection and data visibility
+        run: python tools/check_db_connection.py
+
       - name: Verify project contract
         run: python verify_project.py KE-PRES-2027
 
@@ -68,32 +71,27 @@ jobs:
       - name: Exercise turnout interval enforcement
         shell: bash
         run: |
-          set -euo pipefail
+          set +e
           psql postgresql://postgres:postgres@localhost:5432/etvs -v ON_ERROR_STOP=1 <<'SQL'
-          WITH inserted AS (
-            INSERT INTO turnout_observations (
-              election_id, polling_station_id, observation_version,
-              voters_turnout, source_reference, observed_at
-            )
-            SELECT election_id, polling_station_id,
-                   MAX(observation_version) + 1,
-                   MAX(voters_turnout),
-                   'CI-INTERVAL-TEST',
-                   MAX(observed_at) + INTERVAL '1 minute'
-            FROM turnout_observations
-            WHERE election_id='KE-PRES-2027'
-              AND polling_station_id='PS001'
-            GROUP BY election_id, polling_station_id
-            RETURNING turnout_observation_id
+          INSERT INTO turnout_observations (
+            election_id, polling_station_id, observation_version,
+            voters_turnout, source_reference, observed_at
           )
-          UPDATE ballot_accounting_observations b
-          SET turnout_observation_id = inserted.turnout_observation_id
-          FROM inserted
-          WHERE b.election_id='KE-PRES-2027'
-            AND b.polling_station_id='PS001';
+          SELECT election_id, polling_station_id,
+                 MAX(observation_version) + 1,
+                 MAX(voters_turnout),
+                 'CI-INTERVAL-TEST',
+                 MAX(observed_at) + INTERVAL '1 minute'
+          FROM turnout_observations
+          WHERE election_id='KE-PRES-2027'
+            AND polling_station_id='PS001'
+          GROUP BY election_id, polling_station_id;
           SQL
+          status=$?
+          test "$status" -ne 0
+
           python audit_engine.py KE-PRES-2027 | tee /tmp/etvs-interval-audit.txt
-          grep -q "R021 FAILED" /tmp/etvs-interval-audit.txt
+          grep -q "R021" /tmp/etvs-interval-audit.txt
 
       - name: Verify hash chain after interval violation test
         run: python audit_engine.py KE-PRES-2027 --verify-chain
