@@ -43,6 +43,9 @@ jobs:
       - name: Validate Python syntax
         run: python -m py_compile seed.py audit_engine.py verify_project.py tools/load_kenya_geography.py tools/check_db_connection.py web/input_app.py
 
+      - name: Validate Kenya geography reconciliation
+        run: python tools/load_kenya_geography.py --check-only
+
       - name: Create PostgreSQL schema
         run: psql postgresql://postgres:postgres@localhost:5432/etvs -v ON_ERROR_STOP=1 -f schema.sql
 
