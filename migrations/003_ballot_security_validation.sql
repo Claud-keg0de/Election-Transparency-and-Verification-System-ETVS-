@@ -1,7 +1,7 @@
 -- ETVS migration 003: ballot security validation
 -- Run after migrations 001 and 002 on an existing PostgreSQL database.
 
-CREATE TABLE ballot_security_features (
+CREATE TABLE IF NOT EXISTS ballot_security_features (
     feature_id TEXT PRIMARY KEY,
     election_id TEXT NOT NULL,
     feature_code TEXT NOT NULL,
@@ -14,9 +14,9 @@ CREATE TABLE ballot_security_features (
         REFERENCES elections(election_id) ON UPDATE CASCADE ON DELETE RESTRICT,
     CONSTRAINT unique_security_feature_per_election UNIQUE (election_id, feature_code)
 );
-CREATE INDEX idx_ballot_security_features_election ON ballot_security_features(election_id);
+CREATE INDEX IF NOT EXISTS idx_ballot_security_features_election ON ballot_security_features(election_id);
 
-CREATE TABLE ballot_security_observations (
+CREATE TABLE IF NOT EXISTS ballot_security_observations (
     ballot_security_observation_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     election_id TEXT NOT NULL,
     polling_station_id TEXT NOT NULL,
@@ -48,10 +48,10 @@ CREATE TABLE ballot_security_observations (
     CONSTRAINT unique_security_observation_version
         UNIQUE (election_id, polling_station_id, position_id, observation_version)
 );
-CREATE INDEX idx_ballot_security_observations_latest
+CREATE INDEX IF NOT EXISTS idx_ballot_security_observations_latest
     ON ballot_security_observations(election_id, polling_station_id, position_id, observation_version DESC);
 
-CREATE TABLE ballot_security_feature_checks (
+CREATE TABLE IF NOT EXISTS ballot_security_feature_checks (
     feature_check_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     ballot_security_observation_id BIGINT NOT NULL,
     feature_id TEXT NOT NULL,
@@ -70,5 +70,5 @@ CREATE TABLE ballot_security_feature_checks (
     CONSTRAINT security_feature_check_identity CHECK (passed_count + failed_count = ballots_checked),
     CONSTRAINT unique_security_feature_check UNIQUE (ballot_security_observation_id, feature_id)
 );
-CREATE INDEX idx_ballot_security_feature_checks_feature ON ballot_security_feature_checks(feature_id);
+CREATE INDEX IF NOT EXISTS idx_ballot_security_feature_checks_feature ON ballot_security_feature_checks(feature_id);
 
