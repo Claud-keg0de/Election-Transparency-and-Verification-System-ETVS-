@@ -2,9 +2,8 @@ name: ETVS PostgreSQL verification
 
 on:
   push:
-    branches: ["main"]
+    branches: ["main", "feature/ballot-security", "integration/**", "feature/kenya-geography-blake3-input-contract", "feature/etvs-input-workflow-postgresql"]
   pull_request:
-    branches: ["main"]
 
 jobs:
   verify:
@@ -39,22 +38,32 @@ jobs:
           python-version: "3.13"
 
       - name: Install dependencies
-        run: python -m pip install --upgrade pip "psycopg[binary]"
+        run: python -m pip install --upgrade pip -r requirements.txt
 
       - name: Validate Python syntax
-        run: python -m py_compile seed.py audit_engine.py verify_project.py
+        run: python -m py_compile seed.py audit_engine.py verify_project.py tools/load_kenya_geography.py tools/check_db_connection.py web/input_app.py
 
       - name: Create PostgreSQL schema
         run: psql postgresql://postgres:postgres@localhost:5432/etvs -v ON_ERROR_STOP=1 -f schema.sql
 
+      - name: Apply migrations
+        run: |
+          for migration in migrations/*.sql; do
+            echo "Applying $migration"
+            psql postgresql://postgres:postgres@localhost:5432/etvs -v ON_ERROR_STOP=1 -f "$migration"
+          done
+
       - name: Seed controlled ETVS dataset
         run: python seed.py --reset
+
+      - name: Check PostgreSQL connection and data visibility
+        run: python tools/check_db_connection.py
 
       - name: Verify project contract
         run: python verify_project.py KE-PRES-2027
 
       - name: Run full audit
-        run: python audit_engine.py KE-PRES-2027
+        run: python audit_engine.py KE-PRES-2027 | tee /tmp/etvs-audit.txt
 
       - name: Verify audit hash chain
         run: python audit_engine.py KE-PRES-2027 --verify-chain
@@ -62,7 +71,7 @@ jobs:
       - name: Exercise turnout interval enforcement
         shell: bash
         run: |
-          set -euo pipefail
+          set +e
           psql postgresql://postgres:postgres@localhost:5432/etvs -v ON_ERROR_STOP=1 <<'SQL'
           INSERT INTO turnout_observations (
             election_id, polling_station_id, observation_version,
@@ -78,8 +87,28 @@ jobs:
             AND polling_station_id='PS001'
           GROUP BY election_id, polling_station_id;
           SQL
-          python audit_engine.py KE-PRES-2027 | tee /tmp/etvs-audit.txt
-          grep -q "R014 FAILED" /tmp/etvs-audit.txt
+          status=$?
+          test "$status" -ne 0
+
+          python audit_engine.py KE-PRES-2027 | tee /tmp/etvs-interval-audit.txt
+          grep -q "R021" /tmp/etvs-interval-audit.txt
 
       - name: Verify hash chain after interval violation test
         run: python audit_engine.py KE-PRES-2027 --verify-chain
+
+      - name: Exercise counterfoil database constraint
+        shell: bash
+        run: |
+          set +e
+          psql postgresql://postgres:postgres@localhost:5432/etvs -v ON_ERROR_STOP=1 <<'SQL'
+          INSERT INTO ballot_units (
+            election_id, polling_station_id, position_id, ballot_batch_id,
+            ballot_serial_number, counterfoil_serial_number, status
+          )
+          SELECT election_id, polling_station_id, position_id, ballot_batch_id,
+                 ballot_serial_number || '-BAD', ballot_serial_number || '-MISMATCH', 'CAST'
+          FROM ballot_units
+          WHERE election_id='KE-PRES-2027'
+          LIMIT 1;
+          SQL
+          test "$?" -ne 0

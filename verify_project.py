@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import blake3
 from getpass import getpass
 
 import psycopg
@@ -23,21 +24,7 @@ REQUIRED_COLUMNS = {
     "result_submissions": {
         "result_submission_id", "election_id", "polling_station_id",
         "candidate_id", "result_version", "votes", "position_id",
-        "submission_hash", "source_document_id",
-    },
-    "ballot_security_features": {
-        "feature_id", "election_id", "feature_code", "feature_name",
-        "feature_type", "required"
-    },
-    "ballot_security_observations": {
-        "ballot_security_observation_id", "election_id", "polling_station_id",
-        "position_id", "observation_version", "ballots_checked",
-        "security_valid_ballots", "security_rejected_ballots", "spoilt_ballots",
-        "observed_at"
-    },
-    "ballot_security_feature_checks": {
-        "feature_check_id", "ballot_security_observation_id", "feature_id",
-        "ballots_checked", "passed_count", "failed_count"
+        "submission_hash", "hash_algorithm", "source_document_id",
     },
     "published_aggregate_totals": {
         "published_aggregate_id", "election_id", "source_document_id",
@@ -46,17 +33,47 @@ REQUIRED_COLUMNS = {
     },
     "polling_stations": {
         "polling_station_id", "election_id", "registration_centre_id",
-        "polling_station_code", "registered_voters",
-        "turnout_reporting_interval_minutes",
+        "polling_station_code", "registered_voters", "turnout_reporting_interval_minutes",
     },
     "turnout_observations": {
         "turnout_observation_id", "election_id", "polling_station_id",
-        "observation_version", "voters_turnout", "source_document_id",
+        "observation_version", "voters_turnout", "hash_algorithm", "source_document_id",
+    },
+    "registered_voter_observations": {
+        "registered_voter_observation_id", "election_id", "polling_station_id",
+        "observation_version", "registered_voters", "observed_at", "source_document_id",
     },
     "ballot_accounting_observations": {
         "ballot_accounting_observation_id", "election_id",
-        "polling_station_id", "observation_version", "valid_votes",
-        "rejected_votes", "spoilt_ballots", "source_document_id",
+        "polling_station_id", "position_id", "observation_version",
+        "valid_votes", "rejected_votes", "spoilt_ballots",
+        "turnout_observation_id", "hash_algorithm", "source_document_id",
+    },
+    "ballot_specifications": {
+        "ballot_specification_id", "election_id", "position_id",
+        "colour_name", "colour_code", "paper_description", "paper_size",
+        "paper_finish", "counterfoil_required", "official_mark_required",
+        "source_document_id",
+    },
+    "ballot_security_features": {
+        "security_feature_id", "ballot_specification_id", "feature_type",
+        "description", "verification_method", "required", "source_document_id",
+    },
+    "ballot_stock_batches": {
+        "ballot_batch_id", "election_id", "position_id",
+        "ballot_specification_id", "polling_station_id", "serial_start",
+        "serial_end", "quantity", "source_document_id", "allocation_status",
+    },
+    "ballot_units": {
+        "ballot_unit_id", "election_id", "polling_station_id", "position_id",
+        "ballot_batch_id", "ballot_serial_number", "counterfoil_serial_number",
+        "status", "source_document_id", "source_reference",
+    },
+    "ballot_security_observations": {
+        "ballot_security_observation_id", "election_id", "polling_station_id",
+        "ballot_specification_id", "ballot_batch_id", "security_feature_id",
+        "serial_number", "observed_status", "observed_value",
+        "verification_method", "source_document_id", "source_reference",
     },
     "audit_runs": {
         "audit_run_id", "election_id", "scope_level", "scope_id",
@@ -77,6 +94,14 @@ REQUIRED_FKS = {
     "fk_published_aggregate_position",
     "fk_audit_run_position",
     "fk_finding_position",
+    "fk_ballot_position",
+    "fk_ballot_turnout_observation",
+    "fk_ballot_security_observation_station_election",
+    "fk_ballot_security_observation_specification",
+    "fk_ballot_security_observation_batch",
+    "fk_ballot_unit_station_election",
+    "fk_ballot_unit_position",
+    "fk_ballot_unit_batch_context",
 }
 
 
@@ -97,6 +122,8 @@ def connection_kwargs() -> dict:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("election_id", nargs="?", default=ELECTION_ID)
+    parser.add_argument("--strict-reference-data", action="store_true",
+                        help="Require the full 6-region/47-county/290-constituency/1450-ward reference dataset and IEBC 2022 special-area totals.")
     args = parser.parse_args()
 
     failures: list[str] = []
@@ -159,6 +186,12 @@ def main() -> int:
                     ("polling_stations", "SELECT COUNT(*) AS n FROM polling_stations WHERE election_id = %s"),
                     ("turnout_observations", "SELECT COUNT(*) AS n FROM turnout_observations WHERE election_id = %s"),
                     ("ballot_accounting_observations", "SELECT COUNT(*) AS n FROM ballot_accounting_observations WHERE election_id = %s"),
+                    ("ballot_specifications", "SELECT COUNT(*) AS n FROM ballot_specifications WHERE election_id = %s"),
+                    ("ballot_security_features", "SELECT COUNT(*) AS n FROM ballot_security_features WHERE ballot_specification_id IN (SELECT ballot_specification_id FROM ballot_specifications WHERE election_id = %s)"),
+                    ("registered_voter_observations", "SELECT COUNT(*) AS n FROM registered_voter_observations WHERE election_id = %s"),
+                    ("ballot_stock_batches", "SELECT COUNT(*) AS n FROM ballot_stock_batches WHERE election_id = %s"),
+                    ("ballot_units", "SELECT COUNT(*) AS n FROM ballot_units WHERE election_id = %s"),
+                    ("ballot_security_observations", "SELECT COUNT(*) AS n FROM ballot_security_observations WHERE election_id = %s"),
                     ("result_submissions", "SELECT COUNT(*) AS n FROM result_submissions WHERE election_id = %s"),
                     ("published_aggregate_totals", "SELECT COUNT(*) AS n FROM published_aggregate_totals WHERE election_id = %s"),
                 ]
@@ -166,20 +199,30 @@ def main() -> int:
                     row = cur.execute(sql, (args.election_id,) if "%s" in sql else ()).fetchone()
                     print(f"{label:35} {row['n']}")
 
-                orphan = cur.execute(
-                    """
+                serial_mismatch = cur.execute("""
                     SELECT COUNT(*) AS n
-                    FROM result_submissions rs
-                    LEFT JOIN candidates c
-                      ON c.candidate_id = rs.candidate_id
-                     AND c.election_id = rs.election_id
-                    WHERE rs.election_id = %s
-                      AND (rs.position_id IS NULL OR c.position_id IS DISTINCT FROM rs.position_id)
-                    """,
-                    (args.election_id,),
-                ).fetchone()["n"]
-                if orphan:
-                    failures.append(f"Result position mismatch rows: {orphan}")
+                    FROM ballot_units
+                    WHERE election_id = %s
+                      AND ballot_serial_number <> counterfoil_serial_number
+                """, (args.election_id,)).fetchone()["n"]
+                if serial_mismatch:
+                    failures.append(f"Ballot/counterfoil serial mismatches: {serial_mismatch}")
+
+                serial_outside = cur.execute("""
+                    SELECT COUNT(*) AS n
+                    FROM ballot_units u
+                    JOIN ballot_stock_batches b ON b.ballot_batch_id = u.ballot_batch_id
+                    WHERE u.election_id = %s
+                      AND (
+                          u.ballot_serial_number ~ '[^0-9]'
+                          OR b.serial_start ~ '[^0-9]'
+                          OR b.serial_end ~ '[^0-9]'
+                          OR u.ballot_serial_number::BIGINT < b.serial_start::BIGINT
+                          OR u.ballot_serial_number::BIGINT > b.serial_end::BIGINT
+                      )
+                """, (args.election_id,)).fetchone()["n"]
+                if serial_outside:
+                    failures.append(f"Serialized ballots outside allocated stock ranges: {serial_outside}")
 
                 interval_invalid = cur.execute("""
                     SELECT COUNT(*) AS n
@@ -215,17 +258,134 @@ def main() -> int:
                 if interval_violations:
                     failures.append(f"Turnout reporting interval violations: {interval_violations}")
 
-                invalid_hash = cur.execute(
+                orphan = cur.execute(
                     """
                     SELECT COUNT(*) AS n
-                    FROM result_submissions
-                    WHERE election_id = %s
-                      AND submission_hash IS NULL
+                    FROM result_submissions rs
+                    LEFT JOIN candidates c
+                      ON c.candidate_id = rs.candidate_id
+                     AND c.election_id = rs.election_id
+                    WHERE rs.election_id = %s
+                      AND (rs.position_id IS NULL OR c.position_id IS DISTINCT FROM rs.position_id)
                     """,
                     (args.election_id,),
                 ).fetchone()["n"]
+                if orphan:
+                    failures.append(f"Result position mismatch rows: {orphan}")
+
+                batch_context_constraint = cur.execute("""
+                    SELECT COUNT(*) AS n
+                    FROM information_schema.table_constraints
+                    WHERE table_schema='public'
+                      AND constraint_name='unique_ballot_batch_context'
+                """).fetchone()["n"]
+                if not batch_context_constraint:
+                    failures.append("Missing ballot-unit batch-context constraint")
+
+                security_specs = cur.execute("""
+                    SELECT COUNT(*)::INTEGER n FROM ballot_specifications WHERE election_id=%s
+                """,(args.election_id,)).fetchone()["n"]
+                position_count = cur.execute("SELECT COUNT(*)::INTEGER n FROM positions").fetchone()["n"]
+                if security_specs != position_count:
+                    failures.append(f"Ballot specifications: expected {position_count}, found {security_specs}")
+
+                incomplete_batches = cur.execute("""
+                    SELECT COUNT(*)::INTEGER n
+                    FROM ballot_stock_batches b
+                    WHERE b.election_id=%s
+                      AND (
+                          b.quantity <= 0
+                          OR b.serial_start !~ '^[0-9]+$'
+                          OR b.serial_end !~ '^[0-9]+$'
+                          OR b.quantity <> (b.serial_end::BIGINT - b.serial_start::BIGINT + 1)
+                      )
+                """,(args.election_id,)).fetchone()["n"]
+                if incomplete_batches:
+                    failures.append(f"Invalid ballot stock ranges: {incomplete_batches}")
+
+                security_orphans = cur.execute("""
+                    SELECT COUNT(*)::INTEGER n
+                    FROM ballot_security_observations o
+                    LEFT JOIN ballot_specifications s ON s.ballot_specification_id=o.ballot_specification_id
+                    LEFT JOIN ballot_stock_batches b ON b.ballot_batch_id=o.ballot_batch_id
+                    WHERE o.election_id=%s
+                      AND (s.election_id IS DISTINCT FROM o.election_id OR b.ballot_batch_id IS NULL)
+                """,(args.election_id,)).fetchone()["n"]
+                if security_orphans:
+                    failures.append(f"Ballot security orphan observations: {security_orphans}")
+
+                invalid_hash = cur.execute("""
+                    SELECT COUNT(*) AS n
+                    FROM result_submissions
+                    WHERE election_id = %s
+                      AND (submission_hash IS NULL OR hash_algorithm <> 'BLAKE3-256')
+                """,(args.election_id,)).fetchone()["n"]
                 if invalid_hash:
-                    failures.append(f"Result submissions without hashes: {invalid_hash}")
+                    failures.append(f"Result submissions without valid BLAKE3 hashes: {invalid_hash}")
+
+                hash_mismatch = 0
+                result_rows = cur.execute("""
+                    SELECT polling_station_id,candidate_id,result_version,votes,submission_hash
+                    FROM result_submissions
+                    WHERE election_id=%s
+                """,(args.election_id,)).fetchall()
+                for row in result_rows:
+                    expected = blake3.blake3(
+                        "|".join(str(x) for x in (
+                            "RESULT", args.election_id, row["polling_station_id"],
+                            row["candidate_id"], row["result_version"], row["votes"]
+                        )).encode()
+                    ).hexdigest()
+                    if row["submission_hash"] != expected:
+                        hash_mismatch += 1
+                if hash_mismatch:
+                    failures.append(f"Result submission hash mismatches: {hash_mismatch}")
+
+                if args.strict_reference_data:
+                                        geography_counts = {
+                                            "regions": cur.execute("SELECT COUNT(*)::INTEGER n FROM etvs_regions").fetchone()["n"],
+                                            "counties": cur.execute("SELECT COUNT(*)::INTEGER n FROM counties").fetchone()["n"],
+                                            "constituencies": cur.execute("SELECT COUNT(*)::INTEGER n FROM constituencies").fetchone()["n"],
+                                            "wards": cur.execute("SELECT COUNT(*)::INTEGER n FROM wards").fetchone()["n"],
+                                        }
+                                        expected_geography = {"regions": 6, "counties": 47, "constituencies": 290, "wards": 1450}
+                                        for label, expected in expected_geography.items():
+                                            if geography_counts[label] != expected:
+                                                failures.append(f"Kenya geography {label}: expected {expected}, found {geography_counts[label]}")
+
+                                        special_counts = cur.execute("""
+                                            SELECT
+                                                COUNT(*) FILTER (WHERE special_area_type='PRISONS')::INTEGER AS prison_areas,
+                                                COUNT(*) FILTER (WHERE special_area_type='DIASPORA')::INTEGER AS diaspora_areas
+                                            FROM special_registration_areas
+                                        """).fetchone()
+                                        if special_counts["prison_areas"] != 1 or special_counts["diaspora_areas"] != 12:
+                                            failures.append(
+                                                "Special registration areas: expected 1 prison area and 12 diaspora country areas, "
+                                                f"found {special_counts['prison_areas']} and {special_counts['diaspora_areas']}"
+                                            )
+
+                                        special_totals = cur.execute("""
+                                            SELECT
+                                                COUNT(*) FILTER (WHERE a.special_area_type='PRISONS')::INTEGER AS prison_stations,
+                                                COUNT(*) FILTER (WHERE a.special_area_type='DIASPORA')::INTEGER AS diaspora_stations,
+                                                COALESCE(SUM(s.registered_voters) FILTER (WHERE a.special_area_type='PRISONS'),0)::BIGINT AS prison_voters,
+                                                COALESCE(SUM(s.registered_voters) FILTER (WHERE a.special_area_type='DIASPORA'),0)::BIGINT AS diaspora_voters
+                                            FROM special_polling_stations s
+                                            JOIN special_registration_centres c ON c.special_registration_centre_id=s.special_registration_centre_id
+                                            JOIN special_registration_areas a ON a.special_area_id=c.special_area_id
+                                            WHERE s.election_reference_year=2022
+                                        """).fetchone()
+                                        if special_totals["prison_stations"] != 106 or special_totals["diaspora_stations"] != 27:
+                                            failures.append(
+                                                "IEBC special polling-station counts: expected 106 prison and 27 diaspora rows, "
+                                                f"found {special_totals['prison_stations']} and {special_totals['diaspora_stations']}"
+                                            )
+                                        if special_totals["prison_voters"] != 7483 or special_totals["diaspora_voters"] != 10443:
+                                            failures.append(
+                                                "IEBC special registered-voter totals: expected 7,483 prison and 10,443 diaspora voters, "
+                                                f"found {special_totals['prison_voters']} and {special_totals['diaspora_voters']}"
+                                            )
 
                 print("-" * 72)
                 if failures:
@@ -237,9 +397,9 @@ def main() -> int:
                 print("SCHEMA CONTRACT: PASS")
                 print("POSITION RELATIONSHIPS: PASS")
                 print("RESULT/CANDIDATE POSITION ALIGNMENT: PASS")
-                print("RESULT SUBMISSION HASH PRESENCE: PASS")
-                print("TURNOUT INTERVAL CONFIGURATION: PASS")
-                print("TURNOUT INTERVAL ENFORCEMENT DATA CHECK: PASS")
+                print("RESULT SUBMISSION BLAKE3 CONTRACT: PASS")
+                print("BALLOT/COUNTERFOIL SERIAL CONTRACT: PASS")
+                print("BALLOT SERIAL RANGE CONTRACT: PASS")
                 print("CONSISTENCY: PASS")
                 return 0
 
