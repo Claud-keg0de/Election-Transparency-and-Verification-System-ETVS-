@@ -1,30 +1,43 @@
 """Load Kenya's complete county/constituency/ward reference geography.
 
-Source:
+Primary source:
     CitizenGuide.KE ward export (compiled from public IEBC materials)
     https://www.citizenguide.ke/api/data/exports/wards?format=json
+
+Cross-reference:
+    Pkiage Kenya Counties/Constituencies/Wards CSV, based on the National
+    Assembly Constituencies and County Assembly Wards Order, 2012.
+    https://github.com/pkiage/data-Kenya-Counties-Constituencies-Wards
+
+The cross-reference is used only to repair a malformed constituency parent
+assignment in the CitizenGuide ward export. Ward names and counties must
+match uniquely; no constituency or ward is fabricated.
 
 The loader intentionally does NOT create polling stations. Polling stations,
 turnout observations, results and ballot accounting are the current ETVS
 source-entry surface.
-
-Examples:
-    python tools/load_kenya_geography.py
-    python tools/load_kenya_geography.py --input kenya_wards.json
-    python tools/load_kenya_geography.py --check-only
 """
 
 from __future__ import annotations
 
 import argparse
+import csv
+import io
 import json
 import os
+import re
+import unicodedata
+from collections import defaultdict
 from pathlib import Path
 from urllib.request import Request, urlopen
 
 import psycopg
 
 SOURCE_URL = "https://www.citizenguide.ke/api/data/exports/wards?format=json"
+CANONICAL_SOURCE_URL = (
+    "https://raw.githubusercontent.com/pkiage/data-Kenya-Counties-Constituencies-Wards/"
+    "main/csv-Kenya-Counties-Constituencies-Wards.csv"
+)
 
 COUNTY_CODES = {
     "Mombasa County":"001","Kwale County":"002","Kilifi County":"003","Tana River County":"004",
@@ -66,12 +79,89 @@ def db_kwargs() -> dict:
     }
 
 
+def fetch_text(url: str) -> str:
+    req = Request(url, headers={"User-Agent": "ETVS-geography-loader/1.0"})
+    with urlopen(req, timeout=60) as response:
+        return response.read().decode("utf-8-sig")
+
+
 def load_json(path: str | None) -> list[dict]:
     if path:
         return json.loads(Path(path).read_text(encoding="utf-8"))
-    req = Request(SOURCE_URL, headers={"User-Agent":"ETVS-geography-loader/1.0"})
-    with urlopen(req, timeout=60) as response:
-        return json.loads(response.read().decode("utf-8"))
+    return json.loads(fetch_text(SOURCE_URL))
+
+
+def load_canonical_csv(path: str | None = None) -> list[dict]:
+    text = Path(path).read_text(encoding="utf-8-sig") if path else fetch_text(CANONICAL_SOURCE_URL)
+    return list(csv.DictReader(io.StringIO(text)))
+
+
+def norm(value: str) -> str:
+    value = unicodedata.normalize("NFKD", value or "")
+    value = value.replace("–", "-").replace("—", "-").replace("’", "'")
+    value = re.sub(r"[^a-z0-9]+", " ", value.casefold())
+    return " ".join(value.split())
+
+
+def canonical_county(value: str) -> str:
+    n = norm(value)
+    for county in COUNTY_CODES:
+        if norm(county) == n or norm(county.removesuffix(" County")) == n:
+            return county
+    raise ValueError(f"Canonical geography contains unknown county: {value!r}")
+
+
+def canonicalize_rows(rows: list[dict], canonical_rows: list[dict]) -> tuple[list[dict], list[dict]]:
+    required = {"ward_code", "name", "constituency_name", "county_name"}
+    if not rows:
+        raise ValueError("Ward dataset is empty.")
+    if not all(required.issubset(r) for r in rows):
+        raise ValueError("Ward dataset is missing one or more required fields.")
+
+    # The canonical file supplies the parent constituency for each ward.
+    # Match on county + normalized ward name, never on ward number alone.
+    canonical_by_ward: dict[tuple[str, str], set[tuple[str, str]]] = defaultdict(set)
+    for r in canonical_rows:
+        county = canonical_county(r["COUNTY NAME"])
+        key = (norm(county), norm(r["WARD NAME"]))
+        canonical_by_ward[key].add((county, r["CONSTITUENCY NAME"]))
+
+    if len(canonical_rows) != 1450:
+        raise ValueError(f"Canonical reference must contain 1450 wards; got {len(canonical_rows)}.")
+
+    source_keys = {(norm(r["county_name"]), norm(r["name"])) for r in rows}
+    canonical_keys = set(canonical_by_ward)
+    missing_wards = sorted(canonical_keys - source_keys)
+    extra_wards = sorted(source_keys - canonical_keys)
+    if missing_wards or extra_wards:
+        raise ValueError(
+            "Ward-level reconciliation failed. "
+            f"Missing canonical wards={missing_wards[:20]} "
+            f"Extra source wards={extra_wards[:20]}"
+        )
+
+    repaired = []
+    changes: dict[tuple[str, str], set[tuple[str, str]]] = defaultdict(set)
+    for row in rows:
+        key = (norm(row["county_name"]), norm(row["name"]))
+        matches = canonical_by_ward[key]
+        if len(matches) != 1:
+            raise ValueError(f"Ambiguous canonical ward match for {row['county_name']} / {row['name']}: {sorted(matches)}")
+        canonical_county_name, canonical_constituency = next(iter(matches))
+        source_pair = (row["county_name"], row["constituency_name"])
+        canonical_pair = (canonical_county_name, canonical_constituency)
+        if source_pair != canonical_pair:
+            changes[source_pair].add(canonical_pair)
+        repaired.append({
+            **row,
+            "county_name": canonical_county_name,
+            "constituency_name": canonical_constituency,
+        })
+
+    return repaired, [
+        {"source": source, "canonical": sorted(targets)}
+        for source, targets in sorted(changes.items())
+    ]
 
 
 def validate(rows: list[dict]) -> tuple[dict[str,dict],dict[tuple[str,str],dict]]:
@@ -110,8 +200,6 @@ def region_for(county_name: str) -> str:
 
 def load(rows: list[dict]) -> None:
     counties,_=validate(rows)
-    # Stable constituency IDs are derived deterministically from the sorted
-    # county/constituency pairs; the official ward code remains the ward ID.
     pairs=sorted({(r["county_name"],r["constituency_name"]) for r in rows})
     constituency_ids={pair:f"CON-{i:03d}" for i,pair in enumerate(pairs,1)}
     with psycopg.connect(**db_kwargs()) as conn:
@@ -154,19 +242,35 @@ def load(rows: list[dict]) -> None:
         conn.commit()
 
 
-def check_only(rows: list[dict]) -> None:
-    validate(rows)
+def check_only(rows: list[dict], canonical_path: str | None = None) -> None:
+    canonical = load_canonical_csv(canonical_path)
+    repaired, changes = canonicalize_rows(rows, canonical)
+    validate(repaired)
     print("REFERENCE DATA VALID: 47 counties / 290 constituencies / 1450 wards")
+    if changes:
+        print("RECONCILED CONSTITUENCY PARENT CHANGES:")
+        for change in changes:
+            print(f"  {change['source']} -> {change['canonical']}")
+    else:
+        print("No constituency parentage changes required.")
 
 
 def main() -> int:
     parser=argparse.ArgumentParser()
     parser.add_argument("--input",help="Local CitizenGuide JSON export.")
+    parser.add_argument("--canonical-input",help="Local canonical constituency/ward CSV.")
     parser.add_argument("--check-only",action="store_true")
     args=parser.parse_args()
     rows=load_json(args.input)
+    canonical = load_canonical_csv(args.canonical_input)
+    rows, changes = canonicalize_rows(rows, canonical)
+    if changes:
+        print("RECONCILED CONSTITUENCY PARENT CHANGES:")
+        for change in changes:
+            print(f"  {change['source']} -> {change['canonical']}")
     if args.check_only:
-        check_only(rows)
+        validate(rows)
+        print("REFERENCE DATA VALID: 47 counties / 290 constituencies / 1450 wards")
     else:
         load(rows)
         print("Loaded Kenya geography: 47 counties / 290 constituencies / 1450 wards")
