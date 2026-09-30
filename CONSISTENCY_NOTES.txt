@@ -69,3 +69,11 @@ The seed deliberately includes anomalies so a successful audit should report
 both PASS and FAIL findings. The audit engine does not modify source
 observations.
 
+
+
+Cross-file integration fixes (2026-09-30)
+-------------------------------------------
+- web/input_app.py now generates result-submission BLAKE3 hashes using the exact canonical payload used by audit_engine.py R010.
+- The polling-station form now reuses an existing registration centre for the selected ward/name and creates deterministic centre IDs only when a new centre is needed; polling stations are no longer used as registration-centre IDs.
+- verify_project.py now validates result hash algorithm and canonical result hashes. Use --strict-reference-data after the reference loader and IEBC special-area migration to enforce 6 regions / 47 counties / 290 constituencies / 1,450 wards plus the 2022 prison/diaspora reference totals.
+- The feature branch still contains duplicate numeric migration prefixes (004 and 005). They are currently applied lexicographically by CI and do not represent duplicate schema objects, but they should be renumbered in a future migration cleanup.
