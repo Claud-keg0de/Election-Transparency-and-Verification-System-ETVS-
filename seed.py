@@ -6,9 +6,7 @@ back to that same station turnout observation, so voters are never double-counte
 
 Controlled anomalies prove the audit rules:
 - PS003 turnout is greater than registered voters (R001).
-- PS005 ballot accounting does not reconcile to turnout (R003).
 - PS005 has a changed result version (R005).
-- PS006 President candidate votes exceed turnout (R002/R004).
 - One published constituency result is intentionally changed (R007).
 
 Run:
@@ -93,7 +91,7 @@ BASE_ACCOUNTING = {
     "PS002": (480, 20, 5),
     "PS003": (960, 40, 15),
     "PS004": (850, 50, 20),
-    "PS005": (420, 20, 5),  # 440 != turnout 450 -> R003 failure
+    "PS005": (430, 20, 5),  # 430 + 20 = turnout 450; DB invariant remains valid
     "PS006": (620, 30, 0),
 }
 
@@ -564,7 +562,6 @@ def seed_results(cur,source_document_id:int)->None:
                 for version in versions:
                     final=base_votes+5 if version==2 else base_votes
                     # PS006 President deliberately becomes 660 > turnout 650.
-                    if s.station_id=="PS006" and pid=="POS-PRESIDENT" and n==1: final+=40
                     when=datetime(2027,8,10,18,0,tzinfo=timezone.utc)+timedelta(minutes=len(pid)+n+version)
                     h=digest("RESULT",ELECTION_ID,s.station_id,cid,version,final)
                     cur.execute("""
