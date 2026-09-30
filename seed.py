@@ -91,7 +91,7 @@ BASE_ACCOUNTING = {
     "PS002": (480, 20, 5),
     "PS003": (960, 40, 15),
     "PS004": (850, 50, 20),
-    "PS005": (430, 20, 5),  # 430 + 20 = turnout 450; DB invariant remains valid
+    "PS005": (435, 15, 5),  # 435 + 15 = turnout 450; candidate total equals valid votes
     "PS006": (620, 30, 0),
 }
 
