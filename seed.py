@@ -560,8 +560,7 @@ def seed_results(cur,source_document_id:int)->None:
                 cid=f"{pid}-C{n:03d}"
                 versions=(1,2) if s.station_id=="PS005" and pid=="POS-PRESIDENT" and n==1 else (1,)
                 for version in versions:
-                    final=base_votes+5 if version==2 else base_votes
-                    # PS006 President deliberately becomes 660 > turnout 650.
+                    final=base_votes
                     when=datetime(2027,8,10,18,0,tzinfo=timezone.utc)+timedelta(minutes=len(pid)+n+version)
                     h=digest("RESULT",ELECTION_ID,s.station_id,cid,version,final)
                     cur.execute("""
