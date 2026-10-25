@@ -43,7 +43,7 @@ def db():
                            password=os.getenv("ETVS_DB_PASSWORD",""),row_factory=dict_row)
 def now(): return datetime.now(timezone.utc)
 def hash_input(*parts): return blake3.blake3("|".join("" if p is None else str(p) for p in parts).encode()).hexdigest()
-def result_submission_hash(election_id, station_id, candidate_id, version, votes, disputed_votes=0):
+def result_submission_hash(election_id, station_id, candidate_id, version, votes):
     # Must remain identical to audit_engine.result_hash() so R010 can verify
     # every result submitted through the form.
     return hash_input("RESULT", election_id, station_id, candidate_id, version, votes)
@@ -204,7 +204,7 @@ def contest():
                     rv=q.execute("""SELECT COALESCE(MAX(result_version),0)+1 AS v FROM result_submissions
                                     WHERE election_id=%s AND polling_station_id=%s AND candidate_id=%s""",(eid,sid,cid)).fetchone()["v"]
                     disputed_vote=disputed[cid]
-                    rh=result_submission_hash(eid,sid,cid,rv,vote,disputed_vote)
+                    rh=result_submission_hash(eid,sid,cid,rv,vote)
                     q.execute("""INSERT INTO result_submissions(election_id,polling_station_id,candidate_id,result_version,votes,disputed_votes,position_id,
                                  submission_hash,submitted_at,observed_at) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
                               (eid,sid,cid,rv,vote,disputed_vote,pid,rh,t,t))
