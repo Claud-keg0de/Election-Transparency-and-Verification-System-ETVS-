@@ -1,7 +1,7 @@
 """ETVS PostgreSQL audit engine.
 
 Design rules:
-    R001  One station turnout cannot exceed registered voters.
+    R001  Turnout for each station/electoral-position stream cannot exceed registered voters.
     R002  Candidate total for ONE contest cannot exceed station turnout.
     R003  For ONE contest: valid + rejected = turnout; spoilt is tracked separately.
     R004  Candidate total for ONE contest must equal valid votes for that contest.
@@ -465,6 +465,10 @@ def aggregate_findings(cur,election_id:str,scope:AuditScope,station_ids:set[str]
     out=[]
     for r in rows:
         level,gid,pid=r["aggregation_level"],r["geography_id"],r["position_id"]
+        # Legacy station-wide turnout aggregates predate the position-specific
+        # contract; preserve them as history but do not compare them to any one
+        # position's current stream.
+        if r["metric"]=="TURNOUT" and pid is None:continue
         if (level,gid) not in allowed:continue
         if scope.position_id and pid not in (None,scope.position_id):continue
         if scope.candidate_id and r["candidate_id"] not in (None,scope.candidate_id):continue
