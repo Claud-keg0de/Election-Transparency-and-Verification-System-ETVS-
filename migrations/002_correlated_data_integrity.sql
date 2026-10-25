@@ -219,7 +219,7 @@ BEGIN
        AND b.polling_station_id = ps.polling_station_id
      WHERE ps.election_id = NEW.election_id
        AND b.position_id IS NOT NULL
-       AND b.turnout_observation_id <> (
+       AND b.turnout_observation_id IS DISTINCT FROM (
             SELECT t.turnout_observation_id
               FROM turnout_observations t
              WHERE t.election_id = ps.election_id
