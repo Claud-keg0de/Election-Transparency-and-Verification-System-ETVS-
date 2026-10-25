@@ -23,9 +23,11 @@ Design rules:
     R020  Ballot stock batches use the specification for their contest.
     R021  Successive turnout observations respect the station-specific reporting interval.
 
-Important: turnout is deliberately NOT duplicated into six independent turnout
-figures. Every contest at a polling station references the same final turnout
-observation. Contest-specific valid/rejected/spoilt counts are audited separately.
+Important: turnout is recorded as a separate observed stream for each
+polling station and electoral position. Legacy rows with a NULL position are
+retained for history but are not reused as the turnout for all six contests.
+Each contest's accounting is reconciled only against its matching position
+turnout observation.
 """
 from __future__ import annotations
 
@@ -40,6 +42,7 @@ import psycopg
 from psycopg.rows import dict_row
 
 DEFAULT_ELECTION_ID = "KE-PRES-2027"
+POSITIONS = ("POS-PRESIDENT","POS-GOVERNOR","POS-SENATOR","POS-WOMEN-REP","POS-MP","POS-MCA")
 GENESIS_HASH = "0" * 64
 PASSED, FAILED, WARNING = "PASSED", "FAILED", "WARNING"
 
