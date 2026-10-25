@@ -6,14 +6,19 @@ Normal human source entry is performed through `web/input_app.py`. `seed.py`
 is retained only as a deterministic development/test fixture and is not the
 normal source-entry mechanism.
 
-The four permitted input areas are:
+The local source-entry workflow has five input areas:
 
 1. **Polling-station details** — election, reference ward, station ID/code,
    registration-centre name, registered voters and the ETVS turnout interval.
-2. **Turnout / voters cast** — one station-wide observation at each configured
-   interval.
-3. **Contest results** — candidate votes for one contest.
-4. **Ballot accounting** — rejected and spoilt ballots for that contest; ETVS
+2. **Turnout / voters cast by position** — a separate, versioned observation for
+   each polling station and each of the six positions (President, Governor,
+   Senator, Woman Representative, MP and MCA). The reporting interval applies
+   independently to each station/position stream.
+3. **Form 34A evidence** — upload the original presidential polling-station PDF/image
+   and manually transcribe its printed fields, candidate rows and disputed-vote
+   decision details. This preserves source evidence separately from contest inputs.
+4. **Contest results** — candidate votes for the selected station and position.
+5. **Ballot accounting** — rejected and spoilt ballots for that contest; ETVS
    derives valid votes from the candidate totals.
 
 ### Current application accounting identity
@@ -27,22 +32,24 @@ turnout = valid votes + rejected ballots
 
 Spoilt ballots are stored separately and are **never treated as votes cast**.
 
-Turnout is shared by the station's six contests; it is not entered six times.
+Turnout is not shared across the six contests. Each station/position has its own versioned observation, and contest accounting must reference the latest turnout for that same position.
 
 This is the current ETVS application/input contract. Do not assume that every
 field is printed on every statutory election form.
 
-## Published Form 34A import is a separate workflow
+## Form 34A evidence capture and remaining import work
 
-The existing source-entry interface is **not yet** a nationwide Form 34A PDF
-importer. Published-document ingestion needs to retain the original file,
-source URI, retrieval timestamp, BLAKE3-256 content hash, extraction revision,
-printed station identity, field-capture state and human-review history before
-it contributes data to the audit.
+The `/form34a` input form accepts an original PDF or image and a manual, reviewable
+transcription of the presidential polling-station return. ETVS retains the original
+file locally, records a BLAKE3-256 content hash and source-document provenance,
+and stores the extraction in dedicated relational tables with explicit capture
+states and reviewer history. It does not silently copy the transcription into
+normalized contest results. Automated nationwide retrieval, OCR, automated field
+extraction and ingestion of official documents for the other five positions remain
+future work.
 
 See [Form 34A evidence model and reconciliation design](form34a-evidence-and-reconciliation.md)
-for the statutory fields, proposed relational tables, audit identities,
-cross-source reconciliation and implementation sequence.
+for the prescribed fields, vote-count semantics, source reconciliation and remaining work.
 
 The source-specific distinctions matter:
 
@@ -68,9 +75,9 @@ tables as human-entered observations.
 
 ## Turnout interval
 
-Each polling station has `turnout_reporting_interval_minutes`. Migration 006
-enforces the minimum elapsed time between successive turnout observations in
-PostgreSQL as well as in the form workflow.
+Each polling station has `turnout_reporting_interval_minutes`. Successive observations
+are checked independently within each station/position stream in PostgreSQL and
+in the input form workflow.
 
 This interval is an **ETVS collection/audit policy**. It should not be described
 as a universal IEBC reporting requirement unless an authoritative source
