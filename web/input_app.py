@@ -203,6 +203,15 @@ def form34a():
                 payload=upload.read(app.config["MAX_CONTENT_LENGTH"]+1)
                 if not payload: raise ValueError("The uploaded source file is empty.")
                 if len(payload)>app.config["MAX_CONTENT_LENGTH"]: raise ValueError("The uploaded file exceeds ETVS_MAX_UPLOAD_BYTES.")
+                signatures={
+                    ".pdf":payload.startswith(b"%PDF-"),
+                    ".png":payload.startswith(b"\\x89PNG\\r\\n\\x1a\\n"),
+                    ".jpg":payload.startswith(b"\\xff\\xd8\\xff"),
+                    ".jpeg":payload.startswith(b"\\xff\\xd8\\xff"),
+                    ".webp":len(payload)>=12 and payload[:4]==b"RIFF" and payload[8:12]==b"WEBP",
+                }
+                if not signatures.get(ext,False):
+                    raise ValueError("The uploaded file does not match its declared PDF/image type.")
                 content_hash=blake3.blake3(payload).hexdigest()
                 source_url=(request.form.get("source_url") or "").strip()
                 if source_url:
