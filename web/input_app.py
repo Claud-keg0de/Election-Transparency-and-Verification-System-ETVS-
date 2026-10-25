@@ -204,11 +204,11 @@ def form34a():
                 if not payload: raise ValueError("The uploaded source file is empty.")
                 if len(payload)>app.config["MAX_CONTENT_LENGTH"]: raise ValueError("The uploaded file exceeds ETVS_MAX_UPLOAD_BYTES.")
                 signatures={
-                    ".pdf":payload.startswith(b"%PDF-"),
-                    ".png":payload.startswith(b"\\x89PNG\\r\\n\\x1a\\n"),
-                    ".jpg":payload.startswith(b"\\xff\\xd8\\xff"),
-                    ".jpeg":payload.startswith(b"\\xff\\xd8\\xff"),
-                    ".webp":len(payload)>=12 and payload[:4]==b"RIFF" and payload[8:12]==b"WEBP",
+                    ".pdf": payload.startswith(b"%PDF-"),
+                    ".png": payload.startswith(b"\x89PNG\r\n\x1a\n"),
+                    ".jpg": payload.startswith(b"\xff\xd8\xff"),
+                    ".jpeg": payload.startswith(b"\xff\xd8\xff"),
+                    ".webp": len(payload)>=12 and payload[:4]==b"RIFF" and payload[8:12]==b"WEBP",
                 }
                 if not signatures.get(ext,False):
                     raise ValueError("The uploaded file does not match its declared PDF/image type.")
