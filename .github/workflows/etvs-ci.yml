@@ -2,7 +2,7 @@ name: ETVS PostgreSQL verification
 
 on:
   push:
-    branches: ["main", "feature/ballot-security", "integration/**", "feature/kenya-geography-blake3-input-contract", "feature/etvs-input-workflow-postgresql"]
+    branches: ["main", "feature/ballot-security", "integration/**", "feature/kenya-geography-blake3-input-contract", "feature/etvs-input-workflow-postgresql", "docs/form34a-evidence-reconciliation"]
   pull_request:
 
 jobs:
@@ -56,6 +56,110 @@ jobs:
       - name: Seed controlled ETVS dataset
         run: python seed.py --reset
 
+      - name: Verify six independent turnout streams at every sample station
+        shell: bash
+        run: |
+          count=$(psql postgresql://postgres:postgres@localhost:5432/etvs -At -v ON_ERROR_STOP=1 -c "
+            SELECT COUNT(*)
+            FROM polling_stations ps
+            CROSS JOIN positions p
+            WHERE ps.election_id='KE-PRES-2027'
+              AND p.position_id IN ('POS-PRESIDENT','POS-GOVERNOR','POS-SENATOR','POS-WOMEN-REP','POS-MP','POS-MCA')
+              AND EXISTS (
+                SELECT 1 FROM turnout_observations t
+                WHERE t.election_id=ps.election_id
+                  AND t.polling_station_id=ps.polling_station_id
+                  AND t.position_id=p.position_id
+              )")
+          expected=$(psql postgresql://postgres:postgres@localhost:5432/etvs -At -v ON_ERROR_STOP=1 -c "
+            SELECT COUNT(*) FROM polling_stations ps CROSS JOIN positions p
+            WHERE ps.election_id='KE-PRES-2027'
+              AND p.position_id IN ('POS-PRESIDENT','POS-GOVERNOR','POS-SENATOR','POS-WOMEN-REP','POS-MP','POS-MCA')")
+          echo "Position-turnout streams present: $count / $expected"
+          test "$count" -eq "$expected"
+
+      - name: Smoke-test local form pages and Form 34A capture
+        run: |
+          python - <<'PY'
+          import io
+          import os
+          import psycopg
+          from werkzeug.datastructures import MultiDict
+          from web.input_app import app
+
+          dbkw = {
+              "host": os.getenv("ETVS_DB_HOST", "localhost"),
+              "port": int(os.getenv("ETVS_DB_PORT", "5432")),
+              "dbname": os.getenv("ETVS_DB_NAME", "etvs"),
+              "user": os.getenv("ETVS_DB_USER", "postgres"),
+              "password": os.getenv("ETVS_DB_PASSWORD", "postgres"),
+          }
+          with psycopg.connect(**dbkw) as conn, conn.cursor() as cur:
+              station = cur.execute("""
+                  SELECT ps.polling_station_id,ps.polling_station_code,ps.registered_voters
+                  FROM polling_stations ps
+                  WHERE ps.election_id='KE-PRES-2027'
+                  ORDER BY ps.polling_station_id LIMIT 1
+              """).fetchone()
+              candidates = cur.execute("""
+                  SELECT c.candidate_id,c.candidate_name,rs.votes
+                  FROM candidates c
+                  JOIN LATERAL (
+                      SELECT votes FROM result_submissions x
+                      WHERE x.election_id=c.election_id
+                        AND x.polling_station_id=%s
+                        AND x.candidate_id=c.candidate_id
+                      ORDER BY result_version DESC LIMIT 1
+                  ) rs ON TRUE
+                  WHERE c.election_id='KE-PRES-2027' AND c.position_id='POS-PRESIDENT'
+                  ORDER BY c.candidate_name
+              """, (station[0],)).fetchall()
+              accounting = cur.execute("""
+                  SELECT valid_votes,rejected_votes
+                  FROM ballot_accounting_observations
+                  WHERE election_id='KE-PRES-2027' AND polling_station_id=%s AND position_id='POS-PRESIDENT'
+                  ORDER BY observation_version DESC LIMIT 1
+              """,(station[0],)).fetchone()
+          assert station and len(candidates) > 0 and accounting
+          app.testing = True
+          with app.test_client() as client:
+              for path in ("/", "/form34a", "/turnout", "/contest"):
+                  response = client.get(path)
+                  assert response.status_code == 200, f"{path} returned {response.status_code}"
+              form = MultiDict([
+                  ("polling_station_id", station[0]),
+                  ("printed_station_code", station[1]),
+                  ("printed_station_name", station[1]),
+                  ("registered_voters_reported", str(station[2])),
+                  ("registered_voters_reported_status", "PRESENT"),
+                  ("candidate_table_valid_total_reported", str(accounting[0])),
+                  ("candidate_table_valid_total_reported_status", "PRESENT"),
+                  ("rejected_ballots_reported", str(accounting[1])),
+                  ("rejected_ballots_reported_status", "PRESENT"),
+                  ("rejection_objected_to_reported", "0"),
+                  ("rejection_objected_to_reported_status", "PRESENT"),
+                  ("disputed_votes_reported", "0"),
+                  ("disputed_votes_reported_status", "PRESENT"),
+                  ("counts_valid_total_reported", str(accounting[0])),
+                  ("counts_valid_total_reported_status", "PRESENT"),
+                  ("presiding_officer_signature_status", "SIGNED"),
+                  ("deputy_presiding_officer_signature_status", "SIGNED"),
+                  ("disputed_detail_status", "COMPLETE"),
+                  ("source_page", "1"),
+                  ("form_file", (io.BytesIO(b"%PDF-1.7\\nETVS Form 34A test fixture\\n"), "form34a-test.pdf")),
+              ])
+              # Use the seeded candidate results as the transcription for this test.
+              for candidate_id, candidate_name, votes in candidates:
+                  form.add("candidate_id", candidate_id)
+                  form.add("candidate_name_printed", candidate_name)
+                  form.add("candidate_votes", str(votes))
+                  form.add("candidate_votes_status", "PRESENT")
+              response = client.post("/form34a", data=form, content_type="multipart/form-data")
+              assert response.status_code == 200, response.get_data(as_text=True)
+              assert b"Form 34A evidence saved" in response.data, response.get_data(as_text=True)
+          print("Flask form pages and Form 34A capture: PASS")
+          PY
+
       - name: Check PostgreSQL connection and data visibility
         run: python tools/check_db_connection.py
 
@@ -74,10 +178,10 @@ jobs:
           set +e
           psql postgresql://postgres:postgres@localhost:5432/etvs -v ON_ERROR_STOP=1 <<'SQL'
           INSERT INTO turnout_observations (
-            election_id, polling_station_id, observation_version,
+            election_id, polling_station_id, position_id, observation_version,
             voters_turnout, source_reference, observed_at
           )
-          SELECT election_id, polling_station_id,
+          SELECT election_id, polling_station_id, position_id,
                  MAX(observation_version) + 1,
                  MAX(voters_turnout),
                  'CI-INTERVAL-TEST',
@@ -85,7 +189,8 @@ jobs:
           FROM turnout_observations
           WHERE election_id='KE-PRES-2027'
             AND polling_station_id='PS001'
-          GROUP BY election_id, polling_station_id;
+            AND position_id='POS-PRESIDENT'
+          GROUP BY election_id, polling_station_id, position_id;
           SQL
           status=$?
           test "$status" -ne 0
