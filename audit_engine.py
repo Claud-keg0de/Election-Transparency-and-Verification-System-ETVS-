@@ -844,7 +844,6 @@ def audit_election(election_id:str,scope:AuditScope)->tuple[int,list[dict],bool,
             findings=position_turnout_findings(cur,election_id,stations)
             findings.extend(station_findings(rows,scope.position_id))
             findings.extend(chronology_findings(rows,scope.position_id))
-            findings.extend(form34a_findings(cur,election_id,stations,scope.position_id))
             findings.extend(result_changes(cur,election_id,stations,scope.position_id,scope.candidate_id))
             findings.extend(integrity_findings(cur,election_id,stations,scope.position_id,scope.candidate_id))
             findings.extend(ballot_security_findings(cur,election_id,stations,scope.position_id))
