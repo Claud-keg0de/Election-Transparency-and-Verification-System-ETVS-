@@ -396,6 +396,7 @@ CREATE TABLE ballot_accounting_observations (
     observation_version INTEGER NOT NULL DEFAULT 1 CHECK(observation_version>0),
     valid_votes INTEGER NOT NULL CHECK(valid_votes>=0),
     rejected_votes INTEGER NOT NULL CHECK(rejected_votes>=0),
+    protested_votes INTEGER NOT NULL DEFAULT 0 CHECK(protested_votes>=0),
     spoilt_ballots INTEGER CHECK(spoilt_ballots IS NULL OR spoilt_ballots>=0),
     turnout_observation_id BIGINT,
     observed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -422,6 +423,7 @@ CREATE TABLE result_submissions (
     candidate_id TEXT NOT NULL,
     result_version INTEGER NOT NULL DEFAULT 1 CHECK(result_version>0),
     votes INTEGER NOT NULL CHECK(votes>=0),
+    disputed_votes INTEGER NOT NULL DEFAULT 0 CHECK(disputed_votes>=0),
     position_id TEXT REFERENCES positions(position_id) ON UPDATE CASCADE ON DELETE RESTRICT,
     submission_hash TEXT,
     hash_algorithm TEXT NOT NULL DEFAULT 'BLAKE3-256',
@@ -444,157 +446,6 @@ CREATE TABLE result_submissions (
     CONSTRAINT result_submission_hash_format CHECK(submission_hash IS NULL OR submission_hash ~ '^[0-9a-f]{64}$'),
     CONSTRAINT unique_result_version UNIQUE(election_id,polling_station_id,candidate_id,result_version)
 );
-
--- ---------------------------------------------------------------------------
--- Published Form 34A evidence and extraction observations
--- ---------------------------------------------------------------------------
-
-CREATE TABLE form34a_observations (
-    form34a_observation_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    election_id TEXT NOT NULL REFERENCES elections(election_id) ON UPDATE CASCADE ON DELETE RESTRICT,
-    polling_station_id TEXT NOT NULL,
-    source_document_id BIGINT NOT NULL REFERENCES source_documents(document_id) ON UPDATE CASCADE ON DELETE RESTRICT,
-    observation_version INTEGER NOT NULL CHECK(observation_version > 0),
-    printed_form_serial TEXT,
-    printed_station_code TEXT,
-    printed_station_name TEXT,
-    printed_ward_name TEXT,
-    printed_constituency_name TEXT,
-    printed_county_name TEXT,
-    registered_voters_reported INTEGER CHECK(registered_voters_reported IS NULL OR registered_voters_reported >= 0),
-    registered_voters_status TEXT NOT NULL DEFAULT 'NOT_CAPTURED'
-        CHECK(registered_voters_status IN ('PRESENT','BLANK','ILLEGIBLE','NOT_CAPTURED')),
-    candidate_table_valid_total_reported INTEGER CHECK(candidate_table_valid_total_reported IS NULL OR candidate_table_valid_total_reported >= 0),
-    candidate_table_valid_total_status TEXT NOT NULL DEFAULT 'NOT_CAPTURED'
-        CHECK(candidate_table_valid_total_status IN ('PRESENT','BLANK','ILLEGIBLE','NOT_CAPTURED')),
-    rejected_ballots_reported INTEGER CHECK(rejected_ballots_reported IS NULL OR rejected_ballots_reported >= 0),
-    rejected_ballots_status TEXT NOT NULL DEFAULT 'NOT_CAPTURED'
-        CHECK(rejected_ballots_status IN ('PRESENT','BLANK','ILLEGIBLE','NOT_CAPTURED')),
-    rejection_objected_to_reported INTEGER CHECK(rejection_objected_to_reported IS NULL OR rejection_objected_to_reported >= 0),
-    rejection_objected_to_status TEXT NOT NULL DEFAULT 'NOT_CAPTURED'
-        CHECK(rejection_objected_to_status IN ('PRESENT','BLANK','ILLEGIBLE','NOT_CAPTURED')),
-    disputed_votes_reported INTEGER CHECK(disputed_votes_reported IS NULL OR disputed_votes_reported >= 0),
-    disputed_votes_status TEXT NOT NULL DEFAULT 'NOT_CAPTURED'
-        CHECK(disputed_votes_status IN ('PRESENT','BLANK','ILLEGIBLE','NOT_CAPTURED')),
-    counts_valid_total_reported INTEGER CHECK(counts_valid_total_reported IS NULL OR counts_valid_total_reported >= 0),
-    counts_valid_total_status TEXT NOT NULL DEFAULT 'NOT_CAPTURED'
-        CHECK(counts_valid_total_status IN ('PRESENT','BLANK','ILLEGIBLE','NOT_CAPTURED')),
-    presiding_officer_signature_status TEXT NOT NULL DEFAULT 'NOT_REVIEWED'
-        CHECK(presiding_officer_signature_status IN ('SIGNED','NOT_SIGNED','ILLEGIBLE','NOT_REVIEWED')),
-    deputy_presiding_officer_signature_status TEXT NOT NULL DEFAULT 'NOT_REVIEWED'
-        CHECK(deputy_presiding_officer_signature_status IN ('SIGNED','NOT_SIGNED','ILLEGIBLE','NOT_REVIEWED')),
-    disputed_detail_status TEXT NOT NULL DEFAULT 'NOT_CAPTURED'
-        CHECK(disputed_detail_status IN ('COMPLETE','PARTIAL','NOT_CAPTURED','NOT_APPLICABLE')),
-    extraction_method TEXT NOT NULL DEFAULT 'MANUAL'
-        CHECK(extraction_method IN ('MANUAL','OCR_ASSISTED','OCR','OTHER')),
-    review_status TEXT NOT NULL DEFAULT 'UNREVIEWED'
-        CHECK(review_status IN ('UNREVIEWED','IN_REVIEW','REVIEWED','NEEDS_CORRECTION','CONFLICTING_COPY')),
-    reviewed_by TEXT,
-    reviewed_at TIMESTAMPTZ,
-    review_notes TEXT,
-    source_page INTEGER CHECK(source_page IS NULL OR source_page > 0),
-    source_reference TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT fk_form34a_station_election
-        FOREIGN KEY(polling_station_id,election_id)
-        REFERENCES polling_stations(polling_station_id,election_id)
-        ON UPDATE CASCADE ON DELETE RESTRICT,
-    CONSTRAINT uq_form34a_station_version UNIQUE(election_id,polling_station_id,observation_version),
-    CONSTRAINT form34a_review_metadata_check CHECK(
-        (review_status='REVIEWED' AND reviewed_by IS NOT NULL AND length(trim(reviewed_by))>0 AND reviewed_at IS NOT NULL)
-        OR (review_status<>'REVIEWED' AND reviewed_at IS NULL)),
-    CONSTRAINT uq_form34a_observation_election UNIQUE(form34a_observation_id,election_id),
-    CONSTRAINT form34a_registered_capture CHECK(
-        (registered_voters_status='PRESENT' AND registered_voters_reported IS NOT NULL) OR
-        (registered_voters_status<>'PRESENT' AND registered_voters_reported IS NULL)),
-    CONSTRAINT form34a_candidate_total_capture CHECK(
-        (candidate_table_valid_total_status='PRESENT' AND candidate_table_valid_total_reported IS NOT NULL) OR
-        (candidate_table_valid_total_status<>'PRESENT' AND candidate_table_valid_total_reported IS NULL)),
-    CONSTRAINT form34a_rejected_capture CHECK(
-        (rejected_ballots_status='PRESENT' AND rejected_ballots_reported IS NOT NULL) OR
-        (rejected_ballots_status<>'PRESENT' AND rejected_ballots_reported IS NULL)),
-    CONSTRAINT form34a_rejection_objected_capture CHECK(
-        (rejection_objected_to_status='PRESENT' AND rejection_objected_to_reported IS NOT NULL) OR
-        (rejection_objected_to_status<>'PRESENT' AND rejection_objected_to_reported IS NULL)),
-    CONSTRAINT form34a_disputed_capture CHECK(
-        (disputed_votes_status='PRESENT' AND disputed_votes_reported IS NOT NULL) OR
-        (disputed_votes_status<>'PRESENT' AND disputed_votes_reported IS NULL)),
-    CONSTRAINT form34a_counts_valid_capture CHECK(
-        (counts_valid_total_status='PRESENT' AND counts_valid_total_reported IS NOT NULL) OR
-        (counts_valid_total_status<>'PRESENT' AND counts_valid_total_reported IS NULL))
-);
-
-CREATE TABLE form34a_candidate_votes (
-    form34a_candidate_vote_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    form34a_observation_id BIGINT NOT NULL,
-    election_id TEXT NOT NULL REFERENCES elections(election_id) ON UPDATE CASCADE ON DELETE RESTRICT,
-    row_number INTEGER NOT NULL CHECK(row_number > 0),
-    candidate_id TEXT,
-    candidate_name_printed TEXT NOT NULL DEFAULT '',
-    votes_reported INTEGER CHECK(votes_reported IS NULL OR votes_reported >= 0),
-    votes_status TEXT NOT NULL DEFAULT 'NOT_CAPTURED'
-        CHECK(votes_status IN ('PRESENT','BLANK','ILLEGIBLE','NOT_CAPTURED')),
-    source_reference TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT fk_form34a_candidate_observation
-        FOREIGN KEY(form34a_observation_id,election_id)
-        REFERENCES form34a_observations(form34a_observation_id,election_id)
-        ON UPDATE CASCADE ON DELETE RESTRICT,
-    CONSTRAINT fk_form34a_candidate_election
-        FOREIGN KEY(candidate_id,election_id)
-        REFERENCES candidates(candidate_id,election_id)
-        ON UPDATE CASCADE ON DELETE RESTRICT,
-    CONSTRAINT uq_form34a_candidate_row UNIQUE(form34a_observation_id,row_number),
-    CONSTRAINT form34a_candidate_vote_capture CHECK(
-        (votes_status='PRESENT' AND votes_reported IS NOT NULL) OR
-        (votes_status<>'PRESENT' AND votes_reported IS NULL))
-);
-
-CREATE TABLE form34a_disputed_vote_decisions (
-    form34a_disputed_decision_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    form34a_observation_id BIGINT NOT NULL,
-    election_id TEXT NOT NULL REFERENCES elections(election_id) ON UPDATE CASCADE ON DELETE RESTRICT,
-    row_number INTEGER NOT NULL CHECK(row_number > 0),
-    ballot_serial_number TEXT,
-    serial_capture_status TEXT NOT NULL DEFAULT 'NOT_CAPTURED'
-        CHECK(serial_capture_status IN ('PRESENT','ILLEGIBLE','NOT_CAPTURED')),
-    assigned_candidate_id TEXT,
-    assigned_candidate_name_printed TEXT,
-    source_reference TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT fk_form34a_disputed_observation
-        FOREIGN KEY(form34a_observation_id,election_id)
-        REFERENCES form34a_observations(form34a_observation_id,election_id)
-        ON UPDATE CASCADE ON DELETE RESTRICT,
-    CONSTRAINT fk_form34a_disputed_candidate
-        FOREIGN KEY(assigned_candidate_id,election_id)
-        REFERENCES candidates(candidate_id,election_id)
-        ON UPDATE CASCADE ON DELETE RESTRICT,
-    CONSTRAINT uq_form34a_disputed_row UNIQUE(form34a_observation_id,row_number),
-    CONSTRAINT form34a_disputed_serial_capture CHECK(
-        (serial_capture_status='PRESENT' AND ballot_serial_number IS NOT NULL AND length(trim(ballot_serial_number))>0) OR
-        (serial_capture_status<>'PRESENT' AND ballot_serial_number IS NULL))
-);
-
-
-CREATE TABLE form34a_review_events (
-    form34a_review_event_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    form34a_observation_id BIGINT NOT NULL,
-    election_id TEXT NOT NULL REFERENCES elections(election_id) ON UPDATE CASCADE ON DELETE RESTRICT,
-    previous_review_status TEXT NOT NULL
-        CHECK(previous_review_status IN ('UNREVIEWED','IN_REVIEW','REVIEWED','NEEDS_CORRECTION','CONFLICTING_COPY')),
-    new_review_status TEXT NOT NULL CHECK(new_review_status='REVIEWED'),
-    reviewer_name TEXT NOT NULL CHECK(length(trim(reviewer_name))>0),
-    review_notes TEXT,
-    reviewed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT fk_form34a_review_event_observation
-        FOREIGN KEY(form34a_observation_id,election_id)
-        REFERENCES form34a_observations(form34a_observation_id,election_id)
-        ON UPDATE CASCADE ON DELETE RESTRICT
-);
-
-CREATE INDEX idx_form34a_review_events_observation
-    ON form34a_review_events(form34a_observation_id,reviewed_at DESC);
 
 -- ---------------------------------------------------------------------------
 -- Audit output
@@ -738,7 +589,6 @@ INSERT INTO etvs_input_scope(input_area,enabled,description) VALUES
 ('POLLING_STATION_DETAILS',TRUE,'Election-specific polling-station configuration and registered-voter baseline.'),
 ('TURNOUT_OBSERVATION',TRUE,'Versioned turnout/voters-cast observations recorded separately for each polling-station and electoral-position stream.'),
 ('POSITION_TURNOUT_OBSERVATION',TRUE,'Record an independent turnout observation for each polling station and electoral position.'),
-('FORM34A_EVIDENCE',TRUE,'Preserve uploaded Form 34A evidence and reviewed field-level observations.'),
 ('RESULT_SUBMISSION',TRUE,'Candidate result values by polling station and contest after voting closes.'),
 ('BALLOT_ACCOUNTING',TRUE,'Contest-level ballot accounting linked to the station turnout observation after voting closes.'),
 ('GEOGRAPHY_REFERENCE',FALSE,'Counties, constituencies and wards are controlled reference data.'),
