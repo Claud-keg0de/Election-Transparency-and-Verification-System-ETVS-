@@ -85,7 +85,8 @@ REQUIRED_COLUMNS = {
         "disputed_votes_reported", "disputed_votes_status",
         "counts_valid_total_reported", "counts_valid_total_status",
         "presiding_officer_signature_status", "deputy_presiding_officer_signature_status",
-        "disputed_detail_status", "extraction_method", "review_status", "source_page",
+        "disputed_detail_status", "extraction_method", "review_status", "reviewed_by",
+        "reviewed_at", "review_notes", "source_page",
     },
     "form34a_candidate_votes": {
         "form34a_candidate_vote_id", "form34a_observation_id", "election_id", "row_number",
@@ -95,6 +96,10 @@ REQUIRED_COLUMNS = {
         "form34a_disputed_decision_id", "form34a_observation_id", "election_id", "row_number",
         "ballot_serial_number", "serial_capture_status", "assigned_candidate_id",
         "assigned_candidate_name_printed", "source_reference",
+    },
+    "form34a_review_events": {
+        "form34a_review_event_id", "form34a_observation_id", "election_id",
+        "previous_review_status", "new_review_status", "reviewer_name", "review_notes", "reviewed_at",
     },
     "audit_runs": {
         "audit_run_id", "election_id", "scope_level", "scope_id",
@@ -128,6 +133,7 @@ REQUIRED_FKS = {
     "fk_form34a_candidate_election",
     "fk_form34a_disputed_observation",
     "fk_form34a_disputed_candidate",
+    "fk_form34a_review_event_observation",
 }
 
 
@@ -214,6 +220,7 @@ def main() -> int:
                     ("form34a_observations", "SELECT COUNT(*) AS n FROM form34a_observations WHERE election_id = %s"),
                     ("form34a_candidate_votes", "SELECT COUNT(*) AS n FROM form34a_candidate_votes WHERE election_id = %s"),
                     ("form34a_disputed_vote_decisions", "SELECT COUNT(*) AS n FROM form34a_disputed_vote_decisions WHERE election_id = %s"),
+                    ("form34a_review_events", "SELECT COUNT(*) AS n FROM form34a_review_events WHERE election_id = %s"),
                     ("ballot_accounting_observations", "SELECT COUNT(*) AS n FROM ballot_accounting_observations WHERE election_id = %s"),
                     ("ballot_specifications", "SELECT COUNT(*) AS n FROM ballot_specifications WHERE election_id = %s"),
                     ("ballot_security_features", "SELECT COUNT(*) AS n FROM ballot_security_features WHERE ballot_specification_id IN (SELECT ballot_specification_id FROM ballot_specifications WHERE election_id = %s)"),
