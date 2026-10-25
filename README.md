@@ -33,32 +33,19 @@ The local form-driven source-entry workflow includes the following input forms:
 
 1. Polling-station details, including the election, geography, station code, registered-voter reference and ETVS reporting interval.
 2. Independent, versioned turnout observations for each polling-station/electoral-position pair (President, Governor, Senator, Woman Representative, MP and MCA).
-3. Form 34A PDF/image upload with manual transcription and review of its presidential polling-station fields.
 4. Candidate results for a selected electoral position/contest.
-5. Contest-specific ballot accounting, including valid, rejected and spoilt ballot counts.
+5. Contest-specific ballot accounting, including valid, rejected, protested and spoilt ballot counts.
 
 The structured results/accounting contract for each selected station and electoral position is:
 
-- `valid_votes = SUM(candidate votes)` for the contest.
-- `voters_turnout = valid_votes + rejected_votes`.
+- `valid_votes = SUM(candidate votes)` for the contest, including disputed votes assigned to candidates.
+- `voters_turnout = valid_votes + rejected_votes + unresolved_protested_votes`.
+- `disputed_votes` is a subset of that candidate's recorded vote total; it is included in valid votes and must not be added again.
+- `protested_votes` records only unresolved protested votes not yet assigned to a candidate; these remain outside valid votes until resolved.
 - Spoilt ballots are stored separately and do not count as votes cast.
 - Turnout is entered independently for each station/position stream; ETVS never copies the President's figure into another contest.
 
-This is the **current application contract**, not a claim that every official election form contains all of these fields. Form 34A has its own printed counts and disputed-vote decision section, captured by the dedicated Form 34A evidence form and stored separately from normalized contest inputs.
-
-## Form 34A source capture versus nationwide import
-
-The local application supports Form 34A PDF/image upload and manual transcription/review at `/form34a`. Nationwide retrieval, OCR/automatic extraction, and ingestion of the corresponding official forms for the other five positions are separate future workflows.
-
-The current schema already provides reusable building blocks:
-
-- `sources` and `source_documents` for provenance and document fingerprints;
-- `source_submissions` and `submission_validation_results` for generic published-source payloads and validation;
-- `registered_voter_observations`, `turnout_observations`, `ballot_accounting_observations` and `result_submissions` for structured observations;
-- `published_aggregate_totals` and `source_comparisons` for published totals and cross-source comparisons;
-- `audit_runs` and `audit_findings` for reproducible audit output, including hash-chained findings.
-
-Form 34A extraction/review tables, manual source upload/transcription, and individual disputed-vote decision capture are implemented in the current schema/UI. Nationwide automated PDF extraction, automatic mapping into normalized contest observations, and a PostGIS-backed map remain future work; see [the Form 34A evidence and reconciliation guide](docs/form34a-evidence-and-reconciliation.md).
+The application uses a normalized polling-station register and generic source-document provenance. It does not provide a dedicated Form 34A upload/transcription/review workflow. Candidate vote totals include disputed votes assigned to that candidate; the disputed count is recorded as a subset, not added twice. The contest-level protested count represents only unresolved protested votes.
 
 ## Architecture and data integrity principles
 
@@ -97,7 +84,6 @@ For exact commands and port details, follow the documentation for the target env
 
 ## Documentation
 
-- [Form 34A evidence model, ballot semantics and reconciliation](docs/form34a-evidence-and-reconciliation.md)
 - [Form-driven PostgreSQL input workflow](docs/form-driven-postgresql-workflow.md)
 - [Kenya geography and input contract](docs/kenya-geography-and-input-contract.md)
 - [PostgreSQL 18 finalization](docs/postgresql18-finalization.md)

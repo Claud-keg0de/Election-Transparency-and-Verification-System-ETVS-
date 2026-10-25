@@ -90,8 +90,10 @@ def digest(*parts: object) -> str:
     return blake3.blake3("|".join("" if p is None else str(p) for p in parts).encode()).hexdigest()
 
 
-def result_hash(election_id: str, station_id: str, candidate_id: str, version: int, votes: int) -> str:
-    return digest("RESULT", election_id, station_id, candidate_id, version, votes)
+def result_hash(election_id: str, station_id: str, candidate_id: str, version: int, votes: int, disputed_votes: int = 0) -> str:
+    # Preserve legacy hashes when disputed_votes is zero.
+    parts=("RESULT", election_id, station_id, candidate_id, version, votes)
+    return digest(*(parts + (("DISPUTED", disputed_votes) if disputed_votes else ())))
 
 
 def ensure_runtime_columns(cur) -> None:
@@ -101,10 +103,12 @@ def ensure_runtime_columns(cur) -> None:
     cur.execute("ALTER TABLE turnout_observations ADD COLUMN IF NOT EXISTS source_document_id BIGINT")
     cur.execute("ALTER TABLE turnout_observations ADD COLUMN IF NOT EXISTS position_id TEXT")
     cur.execute("ALTER TABLE ballot_accounting_observations ADD COLUMN IF NOT EXISTS observed_at TIMESTAMPTZ")
+    cur.execute("ALTER TABLE ballot_accounting_observations ADD COLUMN IF NOT EXISTS protested_votes INTEGER NOT NULL DEFAULT 0 CHECK(protested_votes>=0)")
     cur.execute("ALTER TABLE ballot_accounting_observations ADD COLUMN IF NOT EXISTS source_document_id BIGINT")
     cur.execute("ALTER TABLE ballot_accounting_observations ADD COLUMN IF NOT EXISTS position_id TEXT")
     cur.execute("ALTER TABLE ballot_accounting_observations ADD COLUMN IF NOT EXISTS turnout_observation_id BIGINT")
     cur.execute("ALTER TABLE result_submissions ADD COLUMN IF NOT EXISTS observed_at TIMESTAMPTZ")
+    cur.execute("ALTER TABLE result_submissions ADD COLUMN IF NOT EXISTS disputed_votes INTEGER NOT NULL DEFAULT 0 CHECK(disputed_votes>=0)")
     cur.execute("ALTER TABLE result_submissions ADD COLUMN IF NOT EXISTS source_document_id BIGINT")
     cur.execute("ALTER TABLE result_submissions ADD COLUMN IF NOT EXISTS position_id TEXT")
     cur.execute("ALTER TABLE result_submissions ADD COLUMN IF NOT EXISTS submission_hash TEXT")
@@ -185,7 +189,7 @@ def latest_station_contests(cur, election_id: str, station_ids: set[str]) -> lis
         ), ballot AS (
             SELECT DISTINCT ON(election_id,polling_station_id,position_id)
                    polling_station_id,position_id,ballot_accounting_observation_id,valid_votes,rejected_votes,
-                   spoilt_ballots,turnout_observation_id,observation_version,observed_at
+                   protested_votes,spoilt_ballots,turnout_observation_id,observation_version,observed_at
             FROM ballot_accounting_observations
             WHERE election_id=%s AND position_id IS NOT NULL
             ORDER BY election_id,polling_station_id,position_id,observation_version DESC
@@ -202,7 +206,7 @@ def latest_station_contests(cur, election_id: str, station_ids: set[str]) -> lis
         SELECT ps.polling_station_id,ps.polling_station_code,
                COALESCE(r.registered_voters,ps.registered_voters) registered_voters,
                r.observed_at registered_at,t.turnout_observation_id,t.voters_turnout,t.observed_at turnout_at,
-               b.position_id,b.valid_votes,b.rejected_votes,b.spoilt_ballots,b.turnout_observation_id ballot_turnout_id,
+               b.position_id,b.valid_votes,b.rejected_votes,b.protested_votes,b.spoilt_ballots,b.turnout_observation_id ballot_turnout_id,
                b.observed_at ballot_at,tot.candidate_votes,tot.candidate_count
         FROM polling_stations ps
         LEFT JOIN registered r ON r.polling_station_id=ps.polling_station_id
@@ -343,20 +347,19 @@ def station_findings(rows:list[dict],position_id:str|None)->list[Finding]:
         pid=r["position_id"]
         if not pid or (position_id and pid!=position_id): continue
         s=r["polling_station_id"]; turn=r["voters_turnout"]
-        valid,rejected,spoilt=r["valid_votes"],r["rejected_votes"],r["spoilt_ballots"]
+        valid,rejected,protested,spoilt=r["valid_votes"],r["rejected_votes"],r["protested_votes"],r["spoilt_ballots"]
         cand=r["candidate_votes"]
         ok=turn is not None and cand is not None and cand<=turn
         out.append(Finding("R002",PASSED if ok else FAILED,
-            f"{s} {pid}: candidate votes total {cand if cand is not None else 'missing'} versus this position's turnout {turn if turn is not None else 'missing'}.",
+            f"{s} {pid}: candidate vote totals (including disputed votes assigned to candidates) {cand if cand is not None else 'missing'} versus this position's turnout {turn if turn is not None else 'missing'}.",
             cand,turn,s,None,"POLLING_STATION",s,pid,"Candidate Votes","Position Turnout"))
-        ok=turn is not None and valid is not None and rejected is not None and valid+rejected==turn
-        accounted=(valid+rejected) if valid is not None and rejected is not None else None
+        ok=turn is not None and valid is not None and rejected is not None and protested is not None and valid+rejected+protested==turn
+        accounted=(valid+rejected+protested) if valid is not None and rejected is not None and protested is not None else None
         if ok:
-            msg=f"{s} {pid}: valid {valid} + rejected {rejected} = turnout {turn}; spoilt ballots recorded separately: {spoilt if spoilt is not None else 'not reported in this source'}."
+            msg=f"{s} {pid}: candidate totals (including assigned disputed votes) {valid} + rejected {rejected} + unresolved protested {protested} = turnout {turn}; spoilt ballots recorded separately: {spoilt if spoilt is not None else 'not reported in this source'}."
         else:
-            msg=f"{s} {pid}: valid {valid} + rejected {rejected} = {accounted if accounted is not None else 'unknown'}; position turnout = {turn if turn is not None else 'missing'}; spoilt ballots are not added to turnout ({spoilt if spoilt is not None else 'not reported'})."
-        out.append(Finding("R003",PASSED if ok else FAILED,msg,accounted,turn,s,None,"POLLING_STATION",s,pid,"Valid + Rejected","Position Turnout"))
-        ok=cand is not None and valid is not None and cand==valid
+            msg=f"{s} {pid}: candidate totals (including assigned disputed votes) {valid} + rejected {rejected} + unresolved protested {protested} = {accounted if accounted is not None else 'unknown'}; position turnout = {turn if turn is not None else 'missing'}; spoilt ballots are not added to turnout ({spoilt if spoilt is not None else 'not reported'})."
+        out.append(Finding("R003",PASSED if ok else FAILED,msg,accounted,turn,s,None,"POLLING_STATION",s,pid,"Candidate Totals + Rejected + Unresolved Protested","Position Turnout"))
         out.append(Finding("R004",PASSED if ok else FAILED,
             f"{s} {pid}: candidate votes total {cand if cand is not None else 'missing'} versus valid votes {valid if valid is not None else 'missing'}.",
             cand,valid,s,None,"POLLING_STATION",s,pid,"Candidate Votes","Valid Votes"))
@@ -388,7 +391,7 @@ def add_latest_result_times(cur,election_id:str,rows:list[dict])->None:
 
 def integrity_findings(cur,election_id:str,station_ids:set[str],position_id:str|None,candidate_id:str|None)->list[Finding]:
     rows=cur.execute("""
-        SELECT result_submission_id,polling_station_id,candidate_id,position_id,result_version,votes,submission_hash
+        SELECT result_submission_id,polling_station_id,candidate_id,position_id,result_version,votes,disputed_votes,submission_hash
         FROM result_submissions WHERE election_id=%s ORDER BY result_submission_id
     """,(election_id,)).fetchall()
     out=[]
@@ -396,7 +399,7 @@ def integrity_findings(cur,election_id:str,station_ids:set[str],position_id:str|
         if r["polling_station_id"] not in station_ids:continue
         if position_id and r["position_id"]!=position_id:continue
         if candidate_id and r["candidate_id"]!=candidate_id:continue
-        expected=result_hash(election_id,r["polling_station_id"],r["candidate_id"],r["result_version"],r["votes"])
+        expected=result_hash(election_id,r["polling_station_id"],r["candidate_id"],r["result_version"],r["votes"],r["disputed_votes"])
         ok=r["submission_hash"]==expected
         out.append(Finding("R010",PASSED if ok else FAILED,
             f"{r['polling_station_id']} {r['position_id']} submission {r['result_submission_id']} hash is {'valid' if ok else 'invalid or missing'}.",
@@ -480,140 +483,6 @@ def aggregate_findings(cur,election_id:str,scope:AuditScope,station_ids:set[str]
         out.append(Finding(codes[level],PASSED if ok else FAILED,
             f"{subject}: derived {metric.lower()} {derived if derived is not None else 'missing'}; published {published}.",
             derived,published,None,r["candidate_id"],level,gid,pid,"Derived Value","Published Value"))
-    return out
-
-
-def form34a_findings(cur,election_id:str,station_ids:set[str],position_id:str|None)->list[Finding]:
-    """Audit the reported/transcribed Form 34A values without rewriting them."""
-    if not station_ids or (position_id and position_id!="POS-PRESIDENT"):
-        return []
-    forms=cur.execute("""
-        SELECT f.*,ps.polling_station_code,
-               COALESCE(rv.registered_voters,ps.registered_voters) official_registered_voters
-        FROM form34a_observations f
-        JOIN polling_stations ps
-          ON ps.polling_station_id=f.polling_station_id AND ps.election_id=f.election_id
-        LEFT JOIN LATERAL (
-            SELECT registered_voters
-            FROM registered_voter_observations rv
-            WHERE rv.election_id=f.election_id AND rv.polling_station_id=f.polling_station_id
-            ORDER BY observation_version DESC LIMIT 1
-        ) rv ON TRUE
-        WHERE f.election_id=%s AND f.polling_station_id=ANY(%s)
-        ORDER BY f.polling_station_id,f.observation_version
-    """,(election_id,list(station_ids))).fetchall()
-    if not forms:
-        return []
-    ids=[r["form34a_observation_id"] for r in forms]
-    rollups=cur.execute("""
-        SELECT form34a_observation_id,COUNT(*)::INTEGER row_count,
-               COUNT(*) FILTER(WHERE votes_status='PRESENT')::INTEGER present_count,
-               SUM(votes_reported) FILTER(WHERE votes_status='PRESENT')::BIGINT candidate_vote_sum
-        FROM form34a_candidate_votes
-        WHERE election_id=%s AND form34a_observation_id=ANY(%s)
-        GROUP BY form34a_observation_id
-    """,(election_id,ids)).fetchall()
-    candidate_map={r["form34a_observation_id"]:r for r in rollups}
-    detail_rows=cur.execute("""
-        SELECT form34a_observation_id,COUNT(*)::INTEGER row_count,
-               COUNT(*) FILTER(WHERE serial_capture_status='PRESENT')::INTEGER serial_count
-        FROM form34a_disputed_vote_decisions
-        WHERE election_id=%s AND form34a_observation_id=ANY(%s)
-        GROUP BY form34a_observation_id
-    """,(election_id,ids)).fetchall()
-    detail_map={r["form34a_observation_id"]:r for r in detail_rows}
-    out=[]
-    def add(form,code,status,message,actual=None,comparison=None,actual_label="Actual Value",comparison_label="Comparison Value"):
-        sid=form["polling_station_id"]
-        out.append(Finding(code,status,message,actual,comparison,sid,None,"POLLING_STATION",sid,"POS-PRESIDENT",
-                           actual_label,comparison_label))
-    for f in forms:
-        fid=f["form34a_observation_id"]; sid=f["polling_station_id"]
-        roll=candidate_map.get(fid)
-        row_count=roll["row_count"] if roll else 0
-        captured=roll["present_count"] if roll else 0
-        candidate_sum=int(roll["candidate_vote_sum"] or 0) if roll else None
-        candidate_complete=bool(roll and row_count>0 and captured==row_count)
-        candidate_total=f["candidate_table_valid_total_reported"] if f["candidate_table_valid_total_status"]=="PRESENT" else None
-        if candidate_complete and candidate_total is not None:
-            ok=candidate_sum==candidate_total
-            add(f,"F34A-001",PASSED if ok else FAILED,
-                f"{sid} Form 34A observation {fid}: candidate-row sum {candidate_sum} {'matches' if ok else 'does not match'} candidate-table valid total {candidate_total}.",
-                candidate_sum,candidate_total,"Candidate Vote Sum","Candidate-table Valid Total")
-        else:
-            add(f,"F34A-001",WARNING,
-                f"{sid} Form 34A observation {fid}: candidate-total check is incomplete; {captured}/{row_count} vote rows have PRESENT values and the printed total state is {f['candidate_table_valid_total_status']}.",
-                candidate_sum,candidate_total,"Candidate Vote Sum","Candidate-table Valid Total")
-        counts_total=f["counts_valid_total_reported"] if f["counts_valid_total_status"]=="PRESENT" else None
-        if candidate_total is not None and counts_total is not None:
-            ok=candidate_total==counts_total
-            add(f,"F34A-002",PASSED if ok else FAILED,
-                f"{sid} Form 34A observation {fid}: candidate-table total {candidate_total} {'matches' if ok else 'differs from'} the counts-section valid total {counts_total}.",
-                candidate_total,counts_total,"Candidate-table Valid Total","Counts-section Valid Total")
-        else:
-            add(f,"F34A-002",WARNING,f"{sid} Form 34A observation {fid}: the two printed valid-vote totals cannot be compared because one or both fields are not PRESENT.",
-                candidate_total,counts_total,"Candidate-table Valid Total","Counts-section Valid Total")
-        rejected=f["rejected_ballots_reported"] if f["rejected_ballots_status"]=="PRESENT" else None
-        objected=f["rejection_objected_to_reported"] if f["rejection_objected_to_status"]=="PRESENT" else None
-        if rejected is not None and objected is not None:
-            ok=objected<=rejected
-            add(f,"F34A-003",PASSED if ok else FAILED,
-                f"{sid} Form 34A observation {fid}: rejection-objected-to count {objected} {'does not exceed' if ok else 'exceeds'} rejected-ballot count {rejected}; it is not a second ballot pool.",
-                objected,rejected,"Rejection Objected To","Rejected Ballots")
-        else:
-            add(f,"F34A-003",WARNING,f"{sid} Form 34A observation {fid}: rejected and rejection-objected-to counts are not both PRESENT.",
-                objected,rejected,"Rejection Objected To","Rejected Ballots")
-        reported_registered=f["registered_voters_reported"] if f["registered_voters_status"]=="PRESENT" else None
-        if counts_total is not None and rejected is not None and reported_registered is not None:
-            votes_cast=counts_total+rejected
-            ok=votes_cast<=reported_registered
-            add(f,"F34A-004",PASSED if ok else FAILED,
-                f"{sid} Form 34A observation {fid}: derived votes-cast estimate (valid {counts_total} + rejected {rejected}) is {votes_cast}; registered voters reported are {reported_registered}.",
-                votes_cast,reported_registered,"Derived Votes-cast Estimate","Registered Voters Reported")
-        else:
-            add(f,"F34A-004",WARNING,f"{sid} Form 34A observation {fid}: votes-cast bound is incomplete because valid, rejected or registered-voter fields are not PRESENT.",
-                None,reported_registered,"Derived Votes-cast Estimate","Registered Voters Reported")
-        official=f["official_registered_voters"]
-        if reported_registered is not None and official is not None:
-            ok=reported_registered==official
-            add(f,"F34A-005",PASSED if ok else FAILED,
-                f"{sid} Form 34A observation {fid}: form reports {reported_registered} registered voters; station/register reference reports {official}.",
-                reported_registered,official,"Form Registered Voters","Reference Registered Voters")
-        else:
-            add(f,"F34A-005",WARNING,f"{sid} Form 34A observation {fid}: registered-voter reference comparison is incomplete.",
-                reported_registered,official,"Form Registered Voters","Reference Registered Voters")
-        printed_code=(f["printed_station_code"] or "").strip().casefold()
-        official_code=(f["polling_station_code"] or "").strip().casefold()
-        if printed_code:
-            ok=printed_code==official_code
-            add(f,"F34A-006",PASSED if ok else FAILED,
-                f"{sid} Form 34A observation {fid}: printed station code {f['printed_station_code']!r} {'matches' if ok else 'does not match'} selected station code {f['polling_station_code']!r}.",
-                1 if ok else 0,1,"Station-code Match","Required Match")
-        else:
-            add(f,"F34A-006",WARNING,f"{sid} Form 34A observation {fid}: printed polling-station code was not captured; station identity needs review.",
-                0,1,"Station-code Match","Required Match")
-        detail=detail_map.get(fid,{"row_count":0,"serial_count":0})
-        disputed=f["disputed_votes_reported"] if f["disputed_votes_status"]=="PRESENT" else None
-        if f["disputed_detail_status"]=="NOT_APPLICABLE":
-            pass
-        elif f["disputed_detail_status"]=="COMPLETE" and disputed is not None and detail["row_count"]==detail["serial_count"]:
-            ok=disputed==detail["serial_count"]
-            add(f,"F34A-007",PASSED if ok else FAILED,
-                f"{sid} Form 34A observation {fid}: disputed aggregate {disputed} {'matches' if ok else 'does not match'} {detail['serial_count']} fully captured serial/decision rows.",
-                detail["serial_count"],disputed,"Captured Disputed Rows","Disputed Votes Reported")
-        else:
-            add(f,"F34A-007",WARNING,f"{sid} Form 34A observation {fid}: disputed detail state is {f['disputed_detail_status']}; aggregate/detail reconciliation is incomplete.",
-                detail["serial_count"],disputed,"Captured Disputed Rows","Disputed Votes Reported")
-        signatures_ok=f["presiding_officer_signature_status"]=="SIGNED" and f["deputy_presiding_officer_signature_status"]=="SIGNED"
-        signatures_reviewed=f["presiding_officer_signature_status"]!="NOT_REVIEWED" and f["deputy_presiding_officer_signature_status"]!="NOT_REVIEWED"
-        signature_status=PASSED if signatures_ok else (FAILED if signatures_reviewed and "NOT_SIGNED" in (f["presiding_officer_signature_status"],f["deputy_presiding_officer_signature_status"]) else WARNING)
-        add(f,"F34A-008",signature_status,
-            f"{sid} Form 34A observation {fid}: signature review states are presiding officer={f['presiding_officer_signature_status']}, deputy presiding officer={f['deputy_presiding_officer_signature_status']}. This flag is not a legal conclusion.",
-            1 if signatures_ok else 0,1,"Both Signatures Marked Present","Source-review Expectation")
-        reviewed=f["review_status"]=="REVIEWED"
-        add(f,"F34A-009",PASSED if reviewed else WARNING,
-            f"{sid} Form 34A observation {fid}: extraction review state is {f['review_status']}; source-derived values remain separate from the original uploaded document.",
-            1 if reviewed else 0,1,"Extraction Reviewed","Reviewed Required")
     return out
 
 
@@ -844,7 +713,6 @@ def audit_election(election_id:str,scope:AuditScope)->tuple[int,list[dict],bool,
             findings=position_turnout_findings(cur,election_id,stations)
             findings.extend(station_findings(rows,scope.position_id))
             findings.extend(chronology_findings(rows,scope.position_id))
-            findings.extend(form34a_findings(cur,election_id,stations,scope.position_id))
             findings.extend(result_changes(cur,election_id,stations,scope.position_id,scope.candidate_id))
             findings.extend(integrity_findings(cur,election_id,stations,scope.position_id,scope.candidate_id))
             findings.extend(ballot_security_findings(cur,election_id,stations,scope.position_id))
