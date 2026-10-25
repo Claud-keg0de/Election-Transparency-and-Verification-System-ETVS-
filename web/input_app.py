@@ -162,6 +162,236 @@ def turnout():
     <button type="submit">Save position turnout</button></form></section>""",stations=stations,positions=positions,sid=sid,pid=pid)
     return render(body,message,error)
 
+
+@app.route("/form34a",methods=["GET","POST"])
+def form34a():
+    """Capture a Form 34A source plus a reviewable transcription of its printed fields."""
+    message=None; error=False
+    with db() as conn,conn.cursor() as q:
+        stations=q.execute("""SELECT ps.polling_station_id,ps.polling_station_code,ps.election_id,ps.registered_voters,
+                                     e.election_name,w.ward_name,c.constituency_name,co.county_name
+                                FROM polling_stations ps JOIN elections e ON e.election_id=ps.election_id
+                                JOIN registration_centres rc ON rc.registration_centre_id=ps.registration_centre_id
+                                JOIN wards w ON w.ward_id=rc.ward_id JOIN constituencies c ON c.constituency_id=w.constituency_id
+                                JOIN counties co ON co.county_id=c.county_id
+                               ORDER BY co.county_name,c.constituency_name,w.ward_name,ps.polling_station_code""").fetchall()
+        sid=request.values.get("polling_station_id","")
+        station=next((s for s in stations if s["polling_station_id"]==sid),None)
+        candidates=[]
+        if station:
+            candidates=q.execute("""SELECT candidate_id,candidate_name FROM candidates
+                                    WHERE election_id=%s AND position_id='POS-PRESIDENT'
+                                    ORDER BY candidate_name""",(station["election_id"],)).fetchall()
+        if request.method=="POST":
+            try:
+                sid=request.form["polling_station_id"].strip()
+                station=q.execute("""SELECT ps.*,e.election_name FROM polling_stations ps
+                                     JOIN elections e ON e.election_id=ps.election_id
+                                     WHERE ps.polling_station_id=%s""",(sid,)).fetchone()
+                if not station: raise ValueError("Select a valid polling station.")
+                candidates=q.execute("""SELECT candidate_id,candidate_name FROM candidates
+                                        WHERE election_id=%s AND position_id='POS-PRESIDENT'
+                                        ORDER BY candidate_name""",(station["election_id"],)).fetchall()
+                candidate_refs={x["candidate_id"]:x["candidate_name"] for x in candidates}
+                upload=request.files.get("form_file")
+                if upload is None or not upload.filename: raise ValueError("Upload the original Form 34A PDF or image.")
+                safe_name=secure_filename(upload.filename)
+                ext=Path(safe_name).suffix.lower()
+                if not safe_name or ext not in ALLOWED_UPLOAD_EXTENSIONS:
+                    raise ValueError("The Form 34A attachment must be a PDF, PNG, JPG, JPEG or WEBP file.")
+                payload=upload.read(app.config["MAX_CONTENT_LENGTH"]+1)
+                if not payload: raise ValueError("The uploaded source file is empty.")
+                if len(payload)>app.config["MAX_CONTENT_LENGTH"]: raise ValueError("The uploaded file exceeds ETVS_MAX_UPLOAD_BYTES.")
+                content_hash=blake3.blake3(payload).hexdigest()
+                source_url=(request.form.get("source_url") or "").strip()
+                if source_url:
+                    parsed=urlparse(source_url)
+                    if parsed.scheme not in ("http","https") or not parsed.netloc:
+                        raise ValueError("Source URL must be a valid HTTP or HTTPS URL.")
+                form_serial=(request.form.get("printed_form_serial") or "").strip() or None
+                printed_code=(request.form.get("printed_station_code") or "").strip() or None
+                printed_station=(request.form.get("printed_station_name") or "").strip() or None
+                printed_ward=(request.form.get("printed_ward_name") or "").strip() or None
+                printed_constituency=(request.form.get("printed_constituency_name") or "").strip() or None
+                printed_county=(request.form.get("printed_county_name") or "").strip() or None
+                source_page_raw=(request.form.get("source_page") or "").strip()
+                source_page=nonneg("Source page",source_page_raw) if source_page_raw else None
+                if source_page==0: raise ValueError("Source page must be greater than zero.")
+                field_values={}
+                for field,label in (
+                    ("registered_voters_reported","Registered voters printed on Form 34A"),
+                    ("candidate_table_valid_total_reported","Candidate-table total valid votes"),
+                    ("rejected_ballots_reported","Rejected ballot papers"),
+                    ("rejection_objected_to_reported","Rejection-objected-to count"),
+                    ("disputed_votes_reported","Disputed votes count"),
+                    ("counts_valid_total_reported","Counts-section total valid votes"),
+                ):
+                    val,state=captured_count(field,label)
+                    field_values[field]=val
+                    field_values[field.replace("_reported","_status")]=state
+
+                pres_sig=request.form.get("presiding_officer_signature_status","NOT_REVIEWED")
+                deputy_sig=request.form.get("deputy_presiding_officer_signature_status","NOT_REVIEWED")
+                if pres_sig not in SIGNATURE_STATES or deputy_sig not in SIGNATURE_STATES:
+                    raise ValueError("Select a valid signature review state.")
+                detail_status=request.form.get("disputed_detail_status","NOT_CAPTURED")
+                if detail_status not in ("COMPLETE","PARTIAL","NOT_CAPTURED","NOT_APPLICABLE"):
+                    raise ValueError("Select a valid disputed-vote detail state.")
+
+                names=request.form.getlist("candidate_name_printed")
+                refs=request.form.getlist("candidate_id")
+                vote_values=request.form.getlist("candidate_votes")
+                vote_states=request.form.getlist("candidate_votes_status")
+                if not names: raise ValueError("Add at least one candidate row from Form 34A.")
+                candidate_rows=[]
+                seen_refs=set()
+                for i,name in enumerate(names):
+                    name=(name or "").strip()
+                    cid=(refs[i] if i<len(refs) else "").strip() or None
+                    raw=(vote_values[i] if i<len(vote_values) else "").strip()
+                    state=(vote_states[i] if i<len(vote_states) else "NOT_CAPTURED").strip().upper()
+                    if state not in CAPTURE_STATES: raise ValueError(f"Candidate row {i+1} has an invalid vote capture state.")
+                    if cid and cid not in candidate_refs: raise ValueError(f"Candidate row {i+1} references a candidate outside this election's presidential contest.")
+                    if cid and cid in seen_refs: raise ValueError(f"Candidate {candidate_refs[cid]} appears more than once in this Form 34A capture.")
+                    if cid: seen_refs.add(cid)
+                    if state=="PRESENT":
+                        vote=nonneg(f"Candidate votes (row {i+1})",raw)
+                        if not name: name=candidate_refs.get(cid,"").strip()
+                        if not name: raise ValueError(f"Candidate row {i+1} needs the printed candidate name.")
+                    else:
+                        if raw: raise ValueError(f"Clear the candidate vote value in row {i+1} when its capture state is {state}.")
+                        vote=None
+                        if not name and not cid and state=="NOT_CAPTURED": continue
+                        if not name and cid: name=candidate_refs[cid]
+                    candidate_rows.append((len(candidate_rows)+1,cid,name,vote,state))
+                if not candidate_rows: raise ValueError("At least one candidate row is required.")
+
+                serials=request.form.getlist("disputed_serial")
+                serial_states=request.form.getlist("disputed_serial_status")
+                assigned_ids=request.form.getlist("disputed_candidate_id")
+                assigned_names=request.form.getlist("disputed_candidate_name")
+                disputed_rows=[]
+                for i,raw_serial in enumerate(serials):
+                    serial=(raw_serial or "").strip()
+                    state=(serial_states[i] if i<len(serial_states) else "NOT_CAPTURED").strip().upper()
+                    cid=(assigned_ids[i] if i<len(assigned_ids) else "").strip() or None
+                    name=(assigned_names[i] if i<len(assigned_names) else "").strip() or None
+                    if state not in ("PRESENT","ILLEGIBLE","NOT_CAPTURED"):
+                        raise ValueError(f"Disputed decision row {i+1} has an invalid serial capture state.")
+                    if cid and cid not in candidate_refs: raise ValueError(f"Disputed decision row {i+1} references a non-presidential candidate.")
+                    if state=="PRESENT" and not serial: raise ValueError(f"Disputed decision row {i+1} needs a ballot serial number.")
+                    if state!="PRESENT" and serial: raise ValueError(f"Clear the serial in disputed decision row {i+1} when state is {state}.")
+                    if not serial and not cid and not name and state=="NOT_CAPTURED": continue
+                    if cid and not name: name=candidate_refs[cid]
+                    disputed_rows.append((len(disputed_rows)+1,serial if state=="PRESENT" else None,state,cid,name))
+
+                upload_root=Path(os.getenv("ETVS_UPLOAD_DIR",str(Path(__file__).resolve().parent.parent/"instance"/"uploads"))).expanduser().resolve()
+                target_dir=upload_root/"form34a"/content_hash
+                target_dir.mkdir(parents=True,exist_ok=True)
+                target=target_dir/safe_name
+                if target.exists() and blake3.blake3(target.read_bytes()).hexdigest()!=content_hash:
+                    raise ValueError("A file with the same stored name but different bytes already exists.")
+                if not target.exists(): target.write_bytes(payload)
+                document_uri=f"local-store://form34a/{content_hash}/{safe_name}"
+                host=(urlparse(source_url).hostname or "").lower() if source_url else ""
+                declared_official=(host=="iebc.or.ke" or host.endswith(".iebc.or.ke"))
+                source_type="OFFICIAL" if declared_official else "OTHER"
+                source_id="SRC-F34A-"+hash_input(content_hash,source_url)[:20].upper()
+                source_name=f"User-submitted Form 34A source {content_hash[:12]}"
+                source_description="Uploaded evidence. Source URL and claimed authority are user-provided and have not been independently authenticated."
+                q.execute("""INSERT INTO sources(source_id,source_name,source_type,organization_name,description,source_url)
+                             VALUES(%s,%s,%s,%s,%s,%s)
+                             ON CONFLICT(source_id) DO UPDATE SET source_url=EXCLUDED.source_url,description=EXCLUDED.description""",
+                          (source_id,source_name,source_type,"IEBC (declared source; not independently verified)" if declared_official else "User-submitted source",source_description,source_url or None))
+                document_name=f"Form34A-{station['polling_station_id']}-{content_hash[:12]}{ext}"
+                doc=q.execute("""INSERT INTO source_documents(source_id,document_name,document_type,document_uri,content_hash,hash_algorithm)
+                                 VALUES(%s,%s,%s,%s,%s,'BLAKE3-256')
+                                 ON CONFLICT(source_id,document_name,content_hash) DO UPDATE SET document_uri=EXCLUDED.document_uri
+                                 RETURNING document_id""",
+                              (source_id,document_name,"FORM34A_PDF" if ext==".pdf" else "FORM34A_IMAGE",document_uri,content_hash)).fetchone()
+                doc_id=doc["document_id"]
+                version=q.execute("""SELECT COALESCE(MAX(observation_version),0)+1 AS v FROM form34a_observations
+                                     WHERE election_id=%s AND polling_station_id=%s""",(station["election_id"],sid)).fetchone()["v"]
+                doc=q.execute("""INSERT INTO form34a_observations(
+                    election_id,polling_station_id,source_document_id,observation_version,printed_form_serial,
+                    printed_station_code,printed_station_name,printed_ward_name,printed_constituency_name,printed_county_name,
+                    registered_voters_reported,registered_voters_status,
+                    candidate_table_valid_total_reported,candidate_table_valid_total_status,
+                    rejected_ballots_reported,rejected_ballots_status,
+                    rejection_objected_to_reported,rejection_objected_to_status,
+                    disputed_votes_reported,disputed_votes_status,
+                    counts_valid_total_reported,counts_valid_total_status,
+                    presiding_officer_signature_status,deputy_presiding_officer_signature_status,
+                    disputed_detail_status,extraction_method,review_status,source_page,source_reference)
+                    VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'MANUAL','UNREVIEWED',%s,%s)
+                    RETURNING form34a_observation_id""",
+                    (station["election_id"],sid,doc_id,version,form_serial,printed_code,printed_station,printed_ward,printed_constituency,printed_county,
+                     field_values["registered_voters_reported"],field_values["registered_voters_status"],
+                     field_values["candidate_table_valid_total_reported"],field_values["candidate_table_valid_total_status"],
+                     field_values["rejected_ballots_reported"],field_values["rejected_ballots_status"],
+                     field_values["rejection_objected_to_reported"],field_values["rejection_objected_to_status"],
+                     field_values["disputed_votes_reported"],field_values["disputed_votes_status"],
+                     field_values["counts_valid_total_reported"],field_values["counts_valid_total_status"],
+                     pres_sig,deputy_sig,detail_status,source_page,f"Uploaded {safe_name}; BLAKE3-256 {content_hash}")).fetchone()
+                observation_id=doc["form34a_observation_id"]
+                for row_no,cid,name,vote,state in candidate_rows:
+                    q.execute("""INSERT INTO form34a_candidate_votes(form34a_observation_id,election_id,row_number,candidate_id,candidate_name_printed,votes_reported,votes_status,source_reference)
+                                 VALUES(%s,%s,%s,%s,%s,%s,%s,%s)""",
+                              (observation_id,station["election_id"],row_no,cid,name,vote,state,f"Form 34A candidate row {row_no}"))
+                for row_no,serial,state,cid,name in disputed_rows:
+                    q.execute("""INSERT INTO form34a_disputed_vote_decisions(form34a_observation_id,election_id,row_number,ballot_serial_number,serial_capture_status,assigned_candidate_id,assigned_candidate_name_printed,source_reference)
+                                 VALUES(%s,%s,%s,%s,%s,%s,%s,%s)""",
+                              (observation_id,station["election_id"],row_no,serial,state,cid,name,f"Form 34A disputed-vote decision row {row_no}"))
+                conn.commit()
+                message=f"Form 34A evidence saved for {sid}: observation {observation_id}, source document {doc_id}. Audit status remains UNREVIEWED until source values are reviewed."
+            except Exception as exc:
+                conn.rollback(); error=True; message=str(exc)
+    body=render_template_string("""<section><h2>Capture Form 34A evidence</h2>
+    <p class="notice">Upload the original Form 34A PDF or scan, then transcribe exactly what is printed. ETVS stores the file locally and records its BLAKE3-256 hash. Uploaded files and source URLs are not independently authenticated. The original evidence and the transcription remain separate.</p>
+    <form method="post" enctype="multipart/form-data">
+    <div class="grid"><div><label>Election / polling station</label><select name="polling_station_id" required><option value="">Select station</option>{% for s in stations %}<option value="{{s.polling_station_id}}" {% if s.polling_station_id==sid %}selected{% endif %}>{{s.election_name}} — {{s.county_name}} / {{s.constituency_name}} / {{s.ward_name}} — {{s.polling_station_code}} ({{s.polling_station_id}})</option>{% endfor %}</select></div>
+    <div><label>Original Form 34A PDF / image</label><input type="file" name="form_file" accept=".pdf,.png,.jpg,.jpeg,.webp,application/pdf,image/png,image/jpeg,image/webp" required><p class="small">Maximum size: {{max_upload_mb}} MB. Storage root is configurable with ETVS_UPLOAD_DIR.</p></div>
+    <div><label>Source URL (optional)</label><input name="source_url" type="url" placeholder="https://www.iebc.or.ke/..."></div>
+    <div><label>Printed form serial number</label><input name="printed_form_serial"></div>
+    <div><label>Printed polling-station code</label><input name="printed_station_code" value="{{station.polling_station_code if station else ''}}"></div>
+    <div><label>Printed polling-station name</label><input name="printed_station_name"></div>
+    <div><label>Printed ward name</label><input name="printed_ward_name"></div>
+    <div><label>Printed constituency name</label><input name="printed_constituency_name"></div>
+    <div><label>Printed county name</label><input name="printed_county_name"></div>
+    <div><label>Source PDF page (if known)</label><input name="source_page" type="number" min="1"></div></div>
+    <h3>Polling-station counts</h3><p class="small">For each count, choose PRESENT and enter a non-negative integer (including 0), or choose BLANK / ILLEGIBLE / NOT_CAPTURED and leave the numeric field empty. Missing and illegible values are not stored as zero.</p>
+    {% for field,label in fields %}<div class="grid"><div><label>{{label}}</label><input name="{{field}}" class="capture-value" type="number" min="0"><select class="capture-state" name="{{field}}_status">{% for st in capture_states %}<option value="{{st}}" {% if st=='PRESENT' %}selected{% endif %}>{{st.replace('_',' ')}}</option>{% endfor %}</select></div></div>{% endfor %}
+    <h3>Candidate votes</h3><p class="small">Known presidential candidates are prefilled from election reference data. Verify each printed name and enter its value. Add an unmatched row if the source cannot be mapped confidently.</p>
+    <table><thead><tr><th>Candidate name as printed</th><th>Canonical match (optional)</th><th>Votes</th><th>Capture state</th></tr></thead><tbody id="candidate-rows">
+    {% for x in candidates %}<tr class="candidate-row"><td><input class="candidate-name" name="candidate_name_printed" value="{{x.candidate_name}}"></td><td><select name="candidate_id"><option value="">Unmatched / review</option>{% for y in candidates %}<option value="{{y.candidate_id}}" {% if y.candidate_id==x.candidate_id %}selected{% endif %}>{{y.candidate_name}}</option>{% endfor %}</select></td><td><input class="candidate-votes" name="candidate_votes" type="number" min="0"></td><td><select class="candidate-state" name="candidate_votes_status">{% for st in capture_states %}<option value="{{st}}" {% if st=='PRESENT' %}selected{% endif %}>{{st.replace('_',' ')}}</option>{% endfor %}</select></td></tr>{% endfor %}
+    {% if not candidates %}<tr class="candidate-row"><td><input class="candidate-name" name="candidate_name_printed"></td><td><select name="candidate_id"><option value="">Unmatched / review</option></select></td><td><input class="candidate-votes" name="candidate_votes" type="number" min="0"></td><td><select class="candidate-state" name="candidate_votes_status">{% for st in capture_states %}<option value="{{st}}" {% if st=='PRESENT' %}selected{% endif %}>{{st.replace('_',' ')}}</option>{% endfor %}</select></td></tr>{% endif %}
+    </tbody></table><button type="button" onclick="addCandidateRow()">Add candidate row</button>
+    <template id="candidate-row-template"><tr class="candidate-row"><td><input class="candidate-name" name="candidate_name_printed"></td><td><select name="candidate_id"><option value="">Unmatched / review</option>{% for y in candidates %}<option value="{{y.candidate_id}}">{{y.candidate_name}}</option>{% endfor %}</select></td><td><input class="candidate-votes" name="candidate_votes" type="number" min="0"></td><td><select class="candidate-state" name="candidate_votes_status">{% for st in capture_states %}<option value="{{st}}" {% if st=='PRESENT' %}selected{% endif %}>{{st.replace('_',' ')}}</option>{% endfor %}</select></td></tr></template>
+    <h3>Declaration/signatures and disputed-vote detail</h3><div class="grid"><div><label>Presiding officer signature</label><select name="presiding_officer_signature_status">{% for st in signature_states %}<option value="{{st}}">{{st.replace('_',' ')}}</option>{% endfor %}</select></div><div><label>Deputy presiding officer signature</label><select name="deputy_presiding_officer_signature_status">{% for st in signature_states %}<option value="{{st}}">{{st.replace('_',' ')}}</option>{% endfor %}</select></div><div><label>Disputed-vote decision detail completeness</label><select name="disputed_detail_status"><option value="NOT_CAPTURED">Not captured</option><option value="COMPLETE">Complete</option><option value="PARTIAL">Partial</option><option value="NOT_APPLICABLE">Not applicable</option></select></div></div>
+    <p class="small">Record individual ballot serial/candidate assignments only where visible on the source. The aggregate disputed count is not a substitute for those details.</p>
+    <table><thead><tr><th>Ballot serial as printed</th><th>Serial state</th><th>Assigned candidate</th><th>Printed name if unmatched</th></tr></thead><tbody id="disputed-rows"><tr class="disputed-row"><td><input name="disputed_serial"></td><td><select name="disputed_serial_status"><option value="NOT_CAPTURED">Not captured</option><option value="PRESENT">Present</option><option value="ILLEGIBLE">Illegible</option></select></td><td><select name="disputed_candidate_id"><option value="">Unmatched / review</option>{% for x in candidates %}<option value="{{x.candidate_id}}">{{x.candidate_name}}</option>{% endfor %}</select></td><td><input name="disputed_candidate_name"></td></tr></tbody></table>
+    <button type="button" onclick="addDisputedRow()">Add disputed-vote row</button>
+    <template id="disputed-row-template"><tr class="disputed-row"><td><input name="disputed_serial"></td><td><select name="disputed_serial_status"><option value="NOT_CAPTURED">Not captured</option><option value="PRESENT">Present</option><option value="ILLEGIBLE">Illegible</option></select></td><td><select name="disputed_candidate_id"><option value="">Unmatched / review</option>{% for x in candidates %}<option value="{{x.candidate_id}}">{{x.candidate_name}}</option>{% endfor %}</select></td><td><input name="disputed_candidate_name"></td></tr></template>
+    <button type="submit">Save Form 34A source and transcription</button></form></section>
+    <script>
+    function syncCapture(box){const state=box.querySelector('.capture-state');const value=box.querySelector('.capture-value');if(state&&value)value.required=state.value==='PRESENT';}
+    function syncCandidate(row){const state=row.querySelector('.candidate-state');const value=row.querySelector('.candidate-votes');const name=row.querySelector('.candidate-name');if(state&&value)value.required=state.value==='PRESENT';if(state&&name)name.required=state.value==='PRESENT';}
+    document.querySelectorAll('.capture-state').forEach(el=>{syncCapture(el.closest('div'));el.addEventListener('change',()=>syncCapture(el.closest('div')));});
+    document.querySelectorAll('.candidate-row').forEach(syncCandidate);
+    document.addEventListener('change',e=>{if(e.target.classList.contains('candidate-state'))syncCandidate(e.target.closest('.candidate-row'));});
+    function addCandidateRow(){document.getElementById('candidate-rows').appendChild(document.getElementById('candidate-row-template').content.cloneNode(true));document.querySelectorAll('.candidate-row').forEach(syncCandidate);}
+    function addDisputedRow(){document.getElementById('disputed-rows').appendChild(document.getElementById('disputed-row-template').content.cloneNode(true));}
+    </script>""",stations=stations,sid=sid,station=station,candidates=candidates,fields=(
+        ("registered_voters_reported","Registered voters"),
+        ("candidate_table_valid_total_reported","Candidate table total valid votes"),
+        ("rejected_ballots_reported","Rejected ballot papers"),
+        ("rejection_objected_to_reported","Rejection objected to"),
+        ("disputed_votes_reported","Disputed votes"),
+        ("counts_valid_total_reported","Counts-section total valid votes"),
+    ),capture_states=CAPTURE_STATES,signature_states=SIGNATURE_STATES,max_upload_mb=app.config["MAX_CONTENT_LENGTH"]//(1024*1024))
+    return render(body,message,error)
+
+
 @app.get("/health/db")
 def health_db():
     try:
