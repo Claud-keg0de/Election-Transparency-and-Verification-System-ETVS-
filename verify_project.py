@@ -36,8 +36,8 @@ REQUIRED_COLUMNS = {
         "polling_station_code", "registered_voters", "turnout_reporting_interval_minutes",
     },
     "turnout_observations": {
-        "turnout_observation_id", "election_id", "polling_station_id",
-        "observation_version", "voters_turnout", "hash_algorithm", "source_document_id",
+        "turnout_observation_id", "election_id", "polling_station_id", "position_id",
+        "observation_version", "voters_turnout", "observed_at", "input_hash", "hash_algorithm", "source_document_id",
     },
     "registered_voter_observations": {
         "registered_voter_observation_id", "election_id", "polling_station_id",
@@ -75,6 +75,32 @@ REQUIRED_COLUMNS = {
         "serial_number", "observed_status", "observed_value",
         "verification_method", "source_document_id", "source_reference",
     },
+    "form34a_observations": {
+        "form34a_observation_id", "election_id", "polling_station_id", "source_document_id",
+        "observation_version", "printed_form_serial", "printed_station_code", "printed_station_name",
+        "registered_voters_reported", "registered_voters_status",
+        "candidate_table_valid_total_reported", "candidate_table_valid_total_status",
+        "rejected_ballots_reported", "rejected_ballots_status",
+        "rejection_objected_to_reported", "rejection_objected_to_status",
+        "disputed_votes_reported", "disputed_votes_status",
+        "counts_valid_total_reported", "counts_valid_total_status",
+        "presiding_officer_signature_status", "deputy_presiding_officer_signature_status",
+        "disputed_detail_status", "extraction_method", "review_status", "reviewed_by",
+        "reviewed_at", "review_notes", "source_page",
+    },
+    "form34a_candidate_votes": {
+        "form34a_candidate_vote_id", "form34a_observation_id", "election_id", "row_number",
+        "candidate_id", "candidate_name_printed", "votes_reported", "votes_status", "source_reference",
+    },
+    "form34a_disputed_vote_decisions": {
+        "form34a_disputed_decision_id", "form34a_observation_id", "election_id", "row_number",
+        "ballot_serial_number", "serial_capture_status", "assigned_candidate_id",
+        "assigned_candidate_name_printed", "source_reference",
+    },
+    "form34a_review_events": {
+        "form34a_review_event_id", "form34a_observation_id", "election_id",
+        "previous_review_status", "new_review_status", "reviewer_name", "review_notes", "reviewed_at",
+    },
     "audit_runs": {
         "audit_run_id", "election_id", "scope_level", "scope_id",
         "candidate_id", "position_id", "status", "findings_count",
@@ -102,6 +128,12 @@ REQUIRED_FKS = {
     "fk_ballot_unit_station_election",
     "fk_ballot_unit_position",
     "fk_ballot_unit_batch_context",
+    "fk_form34a_station_election",
+    "fk_form34a_candidate_observation",
+    "fk_form34a_candidate_election",
+    "fk_form34a_disputed_observation",
+    "fk_form34a_disputed_candidate",
+    "fk_form34a_review_event_observation",
 }
 
 
@@ -185,6 +217,10 @@ def main() -> int:
                     ("candidates", "SELECT COUNT(*) AS n FROM candidates WHERE election_id = %s"),
                     ("polling_stations", "SELECT COUNT(*) AS n FROM polling_stations WHERE election_id = %s"),
                     ("turnout_observations", "SELECT COUNT(*) AS n FROM turnout_observations WHERE election_id = %s"),
+                    ("form34a_observations", "SELECT COUNT(*) AS n FROM form34a_observations WHERE election_id = %s"),
+                    ("form34a_candidate_votes", "SELECT COUNT(*) AS n FROM form34a_candidate_votes WHERE election_id = %s"),
+                    ("form34a_disputed_vote_decisions", "SELECT COUNT(*) AS n FROM form34a_disputed_vote_decisions WHERE election_id = %s"),
+                    ("form34a_review_events", "SELECT COUNT(*) AS n FROM form34a_review_events WHERE election_id = %s"),
                     ("ballot_accounting_observations", "SELECT COUNT(*) AS n FROM ballot_accounting_observations WHERE election_id = %s"),
                     ("ballot_specifications", "SELECT COUNT(*) AS n FROM ballot_specifications WHERE election_id = %s"),
                     ("ballot_security_features", "SELECT COUNT(*) AS n FROM ballot_security_features WHERE ballot_specification_id IN (SELECT ballot_specification_id FROM ballot_specifications WHERE election_id = %s)"),
@@ -240,9 +276,8 @@ def main() -> int:
                                ps.turnout_reporting_interval_minutes,
                                t.observed_at,
                                LAG(t.observed_at) OVER (
-                                   PARTITION BY t.election_id,t.polling_station_id
-                                   ORDER BY t.observed_at,t.observation_version
-                               ) previous_observed_at
+                                   PARTITION BY t.election_id,t.polling_station_id,t.position_id
+                                   ORDER BY t.position_id NULLS FIRST,t.observed_at,t.observation_version) previous_observed_at
                         FROM polling_stations ps
                         JOIN turnout_observations t
                           ON t.election_id=ps.election_id

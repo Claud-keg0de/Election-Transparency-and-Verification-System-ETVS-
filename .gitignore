@@ -44,3 +44,6 @@ Thumbs.db
 # Backups
 *.bak
 *.backup
+# Local uploads and runtime instance data (including Form 34A source files)
+instance/
+uploads/

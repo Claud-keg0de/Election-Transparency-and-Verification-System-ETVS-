@@ -1,7 +1,7 @@
 """ETVS PostgreSQL audit engine.
 
 Design rules:
-    R001  One station turnout cannot exceed registered voters.
+    R001  Turnout for each station/electoral-position stream cannot exceed registered voters.
     R002  Candidate total for ONE contest cannot exceed station turnout.
     R003  For ONE contest: valid + rejected = turnout; spoilt is tracked separately.
     R004  Candidate total for ONE contest must equal valid votes for that contest.
@@ -23,9 +23,11 @@ Design rules:
     R020  Ballot stock batches use the specification for their contest.
     R021  Successive turnout observations respect the station-specific reporting interval.
 
-Important: turnout is deliberately NOT duplicated into six independent turnout
-figures. Every contest at a polling station references the same final turnout
-observation. Contest-specific valid/rejected/spoilt counts are audited separately.
+Important: turnout is recorded as a separate observed stream for each
+polling station and electoral position. Legacy rows with a NULL position are
+retained for history but are not reused as the turnout for all six contests.
+Each contest's accounting is reconciled only against its matching position
+turnout observation.
 """
 from __future__ import annotations
 
@@ -40,6 +42,7 @@ import psycopg
 from psycopg.rows import dict_row
 
 DEFAULT_ELECTION_ID = "KE-PRES-2027"
+POSITIONS = ("POS-PRESIDENT","POS-GOVERNOR","POS-SENATOR","POS-WOMEN-REP","POS-MP","POS-MCA")
 GENESIS_HASH = "0" * 64
 PASSED, FAILED, WARNING = "PASSED", "FAILED", "WARNING"
 
@@ -96,6 +99,7 @@ def ensure_runtime_columns(cur) -> None:
     cur.execute("ALTER TABLE polling_stations ADD COLUMN IF NOT EXISTS turnout_reporting_interval_minutes INTEGER NOT NULL DEFAULT 30")
     cur.execute("ALTER TABLE turnout_observations ADD COLUMN IF NOT EXISTS observed_at TIMESTAMPTZ")
     cur.execute("ALTER TABLE turnout_observations ADD COLUMN IF NOT EXISTS source_document_id BIGINT")
+    cur.execute("ALTER TABLE turnout_observations ADD COLUMN IF NOT EXISTS position_id TEXT")
     cur.execute("ALTER TABLE ballot_accounting_observations ADD COLUMN IF NOT EXISTS observed_at TIMESTAMPTZ")
     cur.execute("ALTER TABLE ballot_accounting_observations ADD COLUMN IF NOT EXISTS source_document_id BIGINT")
     cur.execute("ALTER TABLE ballot_accounting_observations ADD COLUMN IF NOT EXISTS position_id TEXT")
@@ -164,7 +168,7 @@ def allowed_geographies(cur, election_id: str, station_ids: set[str]) -> set[tup
 
 
 def latest_station_contests(cur, election_id: str, station_ids: set[str]) -> list[dict]:
-    """Return one row per station and contest, never mixing positions."""
+    """Return at most one row per station/position; turnout streams never cross positions."""
     if not station_ids:
         return []
     return cur.execute("""
@@ -173,10 +177,11 @@ def latest_station_contests(cur, election_id: str, station_ids: set[str]) -> lis
             FROM registered_voter_observations
             WHERE election_id=%s ORDER BY election_id,polling_station_id,observation_version DESC
         ), turnout AS (
-            SELECT DISTINCT ON(election_id,polling_station_id) polling_station_id,turnout_observation_id,
-                   voters_turnout,observation_version,observed_at
-            FROM turnout_observations WHERE election_id=%s
-            ORDER BY election_id,polling_station_id,observation_version DESC
+            SELECT DISTINCT ON(election_id,polling_station_id,position_id)
+                   polling_station_id,position_id,turnout_observation_id,voters_turnout,observation_version,observed_at
+            FROM turnout_observations
+            WHERE election_id=%s AND position_id IS NOT NULL
+            ORDER BY election_id,polling_station_id,position_id,observation_version DESC
         ), ballot AS (
             SELECT DISTINCT ON(election_id,polling_station_id,position_id)
                    polling_station_id,position_id,ballot_accounting_observation_id,valid_votes,rejected_votes,
@@ -201,8 +206,8 @@ def latest_station_contests(cur, election_id: str, station_ids: set[str]) -> lis
                b.observed_at ballot_at,tot.candidate_votes,tot.candidate_count
         FROM polling_stations ps
         LEFT JOIN registered r ON r.polling_station_id=ps.polling_station_id
-        LEFT JOIN turnout t ON t.polling_station_id=ps.polling_station_id
         LEFT JOIN ballot b ON b.polling_station_id=ps.polling_station_id
+        LEFT JOIN turnout t ON t.polling_station_id=ps.polling_station_id AND t.position_id=b.position_id
         LEFT JOIN totals tot ON tot.polling_station_id=b.polling_station_id AND tot.position_id=b.position_id
         WHERE ps.election_id=%s AND ps.polling_station_id=ANY(%s)
         ORDER BY ps.polling_station_id,b.position_id
@@ -231,8 +236,47 @@ def result_changes(cur,election_id:str,station_ids:set[str],position_id:str|None
     return out
 
 
+def position_turnout_findings(cur,election_id:str,station_ids:set[str])->list[Finding]:
+    """Check turnout against registered voters independently for each station/position."""
+    if not station_ids:
+        return []
+    rows=cur.execute("""
+        WITH registered AS (
+            SELECT DISTINCT ON(election_id,polling_station_id) polling_station_id,registered_voters,observed_at
+            FROM registered_voter_observations
+            WHERE election_id=%s ORDER BY election_id,polling_station_id,observation_version DESC
+        ), turnout AS (
+            SELECT DISTINCT ON(election_id,polling_station_id,position_id)
+                   polling_station_id,position_id,voters_turnout,turnout_observation_id,observed_at
+            FROM turnout_observations
+            WHERE election_id=%s AND position_id=ANY(%s)
+            ORDER BY election_id,polling_station_id,position_id,observation_version DESC
+        )
+        SELECT ps.polling_station_id,
+               COALESCE(r.registered_voters,ps.registered_voters) registered_voters,
+               p.position_id,t.voters_turnout,t.turnout_observation_id
+        FROM polling_stations ps CROSS JOIN positions p
+        LEFT JOIN registered r ON r.polling_station_id=ps.polling_station_id
+        LEFT JOIN turnout t ON t.polling_station_id=ps.polling_station_id AND t.position_id=p.position_id
+        WHERE ps.election_id=%s AND ps.polling_station_id=ANY(%s) AND p.position_id=ANY(%s)
+        ORDER BY ps.polling_station_id,p.position_id
+    """,(election_id,election_id,list(POSITIONS),election_id,list(station_ids),list(POSITIONS))).fetchall()
+    out=[]
+    for row in rows:
+        station=row["polling_station_id"]; pid=row["position_id"]
+        turnout=row["voters_turnout"]; registered=row["registered_voters"]
+        ok=turnout is not None and registered is not None and turnout<=registered
+        if turnout is None:
+            message=f"{station} {pid}: no position-specific turnout observation has been recorded."
+        else:
+            message=f"{station} {pid}: turnout {turnout} {'does not exceed' if ok else 'exceeds or cannot be compared with'} registered voters {registered if registered is not None else 'missing'}."
+        out.append(Finding("R001",PASSED if ok else FAILED,message,turnout,registered,
+            station,None,"POLLING_STATION",station,pid,"Position Turnout","Registered Voters"))
+    return out
+
+
 def turnout_interval_findings(cur,election_id:str,station_ids:set[str])->list[Finding]:
-    """Enforce each polling station's configured minimum turnout interval."""
+    """Enforce the configured minimum interval per station and electoral position."""
     if not station_ids:
         return []
     stations=cur.execute("""
@@ -241,28 +285,33 @@ def turnout_interval_findings(cur,election_id:str,station_ids:set[str])->list[Fi
         ORDER BY polling_station_id
     """,(election_id,list(station_ids))).fetchall()
     observations=cur.execute("""
-        SELECT polling_station_id,observation_version,observed_at
+        SELECT polling_station_id,position_id,observation_version,observed_at
         FROM turnout_observations WHERE election_id=%s AND polling_station_id=ANY(%s)
-        ORDER BY polling_station_id,observed_at,observation_version
+        ORDER BY polling_station_id,position_id,observed_at,observation_version
     """,(election_id,list(station_ids))).fetchall()
-    by_station={}
-    for row in observations: by_station.setdefault(row["polling_station_id"],[]).append(row)
+    by_stream={}
+    for row in observations:
+        by_stream.setdefault((row["polling_station_id"],row["position_id"]),[]).append(row)
     out=[]
     for st in stations:
-        sid=st["polling_station_id"]; interval=st["turnout_reporting_interval_minutes"]; obs=by_station.get(sid,[])
-        if interval is None or interval < 1 or interval > 1440:
-            out.append(Finding("R021",FAILED,f"{sid}: turnout reporting interval is missing or invalid ({interval}).",interval,1,sid,None,"POLLING_STATION",sid,None,"Configured Interval (minutes)","Valid Interval (minutes)"))
-            continue
-        violations=[]
-        for previous,current in zip(obs,obs[1:]):
-            if previous["observed_at"] is None or current["observed_at"] is None:
-                violations.append("missing observation timestamp"); continue
-            elapsed=(current["observed_at"]-previous["observed_at"]).total_seconds()/60
-            if elapsed < interval: violations.append(f"{previous['observation_version']}→{current['observation_version']} elapsed {elapsed:g} minutes")
-        ok=not violations
-        out.append(Finding("R021",PASSED if ok else FAILED,
-            f"{sid}: successive turnout observations {'respect' if ok else 'violate'} the configured minimum interval of {interval} minutes." + ("" if ok else " Violations: "+", ".join(violations)+"."),
-            interval,interval,sid,None,"POLLING_STATION",sid,None,"Configured Interval (minutes)","Required Minimum Interval (minutes)"))
+        sid=st["polling_station_id"]; interval=st["turnout_reporting_interval_minutes"]
+        streams=[(key,obs) for key,obs in by_stream.items() if key[0]==sid]
+        for (stream_station,pid),obs in streams:
+            if interval is None or interval<1 or interval>1440:
+                out.append(Finding("R021",FAILED,f"{sid} {pid or 'legacy station-wide stream'}: turnout interval is missing or invalid ({interval}).",
+                    interval,1,sid,None,"POLLING_STATION",sid,pid,"Configured Interval (minutes)","Valid Interval (minutes)"))
+                continue
+            violations=[]
+            for previous,current in zip(obs,obs[1:]):
+                if previous["observed_at"] is None or current["observed_at"] is None:
+                    violations.append("missing observation timestamp"); continue
+                elapsed=(current["observed_at"]-previous["observed_at"]).total_seconds()/60
+                if elapsed<interval:
+                    violations.append(f"{previous['observation_version']}→{current['observation_version']} elapsed {elapsed:g} minutes")
+            ok=not violations
+            out.append(Finding("R021",PASSED if ok else FAILED,
+                f"{sid} {pid or 'legacy station-wide stream'}: successive turnout observations {'respect' if ok else 'violate'} the configured minimum interval of {interval} minutes." + ("" if ok else " Violations: "+", ".join(violations)+"."),
+                interval,interval,sid,None,"POLLING_STATION",sid,pid,"Configured Interval (minutes)","Required Minimum Interval (minutes)"))
     return out
 
 
@@ -271,22 +320,20 @@ def chronology_findings(rows:list[dict],position_id:str|None)->list[Finding]:
     seen=set()
     for r in rows:
         pid=r["position_id"]
-        if position_id and pid!=position_id: continue
+        if not pid or (position_id and pid!=position_id): continue
         key=(r["polling_station_id"],pid)
         if key in seen: continue
         seen.add(key)
         station=r["polling_station_id"]
         reg,turn,ballot=r["registered_at"],r["turnout_at"],r["ballot_at"]
-        # R011: registration must exist and precede turnout.
         ok=reg is not None and turn is not None and reg<=turn
         out.append(Finding("R011",PASSED if ok else FAILED,
-            f"{station}: registered-voter observation {('precedes' if ok else 'does not precede')} turnout.",
+            f"{station} {pid}: registered-voter evidence {('precedes' if ok else 'does not precede')} the position turnout observation.",
             1 if ok else 0,1,station,None,"POLLING_STATION",station,pid,"Chronology Check","Required Order"))
-        # R012: every contest ballot observation must use the same turnout stream and occur after it.
         ok=turn is not None and ballot is not None and turn<=ballot and r["ballot_turnout_id"]==r["turnout_observation_id"]
         out.append(Finding("R012",PASSED if ok else FAILED,
-            f"{station} {pid}: ballot accounting {('references and follows' if ok else 'does not correctly reference/follow')} the final station turnout observation.",
-            1 if ok else 0,1,station,None,"POLLING_STATION",station,pid,"Chronology Check","Shared Turnout Reference"))
+            f"{station} {pid}: ballot accounting {('references and follows' if ok else 'does not correctly reference/follow')} the latest turnout observation for the same position.",
+            1 if ok else 0,1,station,None,"POLLING_STATION",station,pid,"Chronology Check","Position Turnout Reference"))
     return out
 
 
@@ -294,33 +341,26 @@ def station_findings(rows:list[dict],position_id:str|None)->list[Finding]:
     out=[]
     for r in rows:
         pid=r["position_id"]
-        if position_id and pid!=position_id: continue
-        s=r["polling_station_id"]; reg=r["registered_voters"]; turn=r["voters_turnout"]
+        if not pid or (position_id and pid!=position_id): continue
+        s=r["polling_station_id"]; turn=r["voters_turnout"]
         valid,rejected,spoilt=r["valid_votes"],r["rejected_votes"],r["spoilt_ballots"]
         cand=r["candidate_votes"]
-        # R001 is station-wide and is emitted once, using the first contest row.
-        if pid == "POS-MCA" or position_id:
-            ok=turn is not None and reg is not None and turn<=reg
-            out.append(Finding("R001",PASSED if ok else FAILED,
-                f"{s}: voter turnout is {turn if turn is not None else 'missing'} and registered voters are {reg if reg is not None else 'missing'}." + ("" if ok else f" Difference: {(turn-reg) if turn is not None and reg is not None else 'unknown'}") ,
-                turn,reg,s,None,"POLLING_STATION",s,pid,"Voter Turnout","Registered Voters"))
-        # R002-R004 are contest-specific. Spoilt ballots never enter the turnout identity.
         ok=turn is not None and cand is not None and cand<=turn
         out.append(Finding("R002",PASSED if ok else FAILED,
-            f"{s} {pid}: candidate votes total {cand if cand is not None else 'missing'} versus turnout {turn if turn is not None else 'missing'}.",
-            cand,turn,s,None,"POLLING_STATION",s,pid,"Candidate Votes","Voter Turnout"))
-        ok=all(x is not None for x in (turn,valid,rejected,spoilt)) and valid+rejected==turn
+            f"{s} {pid}: candidate votes total {cand if cand is not None else 'missing'} versus this position's turnout {turn if turn is not None else 'missing'}.",
+            cand,turn,s,None,"POLLING_STATION",s,pid,"Candidate Votes","Position Turnout"))
+        ok=turn is not None and valid is not None and rejected is not None and valid+rejected==turn
+        accounted=(valid+rejected) if valid is not None and rejected is not None else None
         if ok:
-            msg=f"{s} {pid}: valid {valid} + rejected {rejected} = turnout {turn}; spoilt ballots recorded separately: {spoilt}."
+            msg=f"{s} {pid}: valid {valid} + rejected {rejected} = turnout {turn}; spoilt ballots recorded separately: {spoilt if spoilt is not None else 'not reported in this source'}."
         else:
-            accounted=(valid+rejected) if valid is not None and rejected is not None else None
-            msg=f"{s} {pid}: valid {valid} + rejected {rejected} = {accounted}; turnout = {turn}; spoilt ballots are excluded from turnout ({spoilt})."
-        out.append(Finding("R003",PASSED if ok else FAILED,msg,(valid+rejected) if valid is not None and rejected is not None else None,turn,s,None,"POLLING_STATION",s,pid,"Valid + Rejected","Voter Turnout"))
+            msg=f"{s} {pid}: valid {valid} + rejected {rejected} = {accounted if accounted is not None else 'unknown'}; position turnout = {turn if turn is not None else 'missing'}; spoilt ballots are not added to turnout ({spoilt if spoilt is not None else 'not reported'})."
+        out.append(Finding("R003",PASSED if ok else FAILED,msg,accounted,turn,s,None,"POLLING_STATION",s,pid,"Valid + Rejected","Position Turnout"))
         ok=cand is not None and valid is not None and cand==valid
         out.append(Finding("R004",PASSED if ok else FAILED,
-            f"{s} {pid}: candidate votes total {cand if cand is not None else 'missing'} versus valid votes {valid if valid is not None else 'missing'}.",cand,valid,s,None,"POLLING_STATION",s,pid,"Candidate Votes","Valid Votes"))
-        # R013 checks that results exist and are published after ballot accounting.
-        result_time=cur_result_time(rows,r)  # populated by helper below
+            f"{s} {pid}: candidate votes total {cand if cand is not None else 'missing'} versus valid votes {valid if valid is not None else 'missing'}.",
+            cand,valid,s,None,"POLLING_STATION",s,pid,"Candidate Votes","Valid Votes"))
+        result_time=cur_result_time(rows,r)
         ok=r["ballot_at"] is not None and result_time is not None and r["ballot_at"]<=result_time
         out.append(Finding("R013",PASSED if ok else FAILED,
             f"{s} {pid}: contest ballot accounting {('precedes' if ok else 'does not precede')} the latest candidate result.",
@@ -365,38 +405,52 @@ def integrity_findings(cur,election_id:str,station_ids:set[str],position_id:str|
 
 
 def aggregate_findings(cur,election_id:str,scope:AuditScope,station_ids:set[str],allowed:set[tuple[str,str]])->list[Finding]:
-    """Compare each contest only at its own geography; turnout is checked at all levels."""
+    """Compare published aggregates to derived totals for the same position and geography."""
     rows=cur.execute("""
         WITH latest_turnout AS (
-            SELECT DISTINCT ON(election_id,polling_station_id) polling_station_id,voters_turnout
-            FROM turnout_observations WHERE election_id=%s ORDER BY election_id,polling_station_id,observation_version DESC
+            SELECT DISTINCT ON(election_id,polling_station_id,position_id)
+                   polling_station_id,position_id,voters_turnout
+            FROM turnout_observations
+            WHERE election_id=%s AND position_id IS NOT NULL
+            ORDER BY election_id,polling_station_id,position_id,observation_version DESC
         ), latest_results AS (
             SELECT DISTINCT ON(election_id,polling_station_id,candidate_id)
                    polling_station_id,candidate_id,position_id,votes
             FROM result_submissions WHERE election_id=%s
             ORDER BY election_id,polling_station_id,candidate_id,result_version DESC
-        ), base AS (
-            SELECT ps.polling_station_id,w.ward_id,c.constituency_id,co.county_id,
-                   COALESCE(t.voters_turnout,0) turnout,lr.candidate_id,lr.position_id,COALESCE(lr.votes,0) votes
+        ), station_geography AS (
+            SELECT ps.polling_station_id,w.ward_id,c.constituency_id,co.county_id
             FROM polling_stations ps
             JOIN registration_centres rc ON rc.registration_centre_id=ps.registration_centre_id
             JOIN wards w ON w.ward_id=rc.ward_id
             JOIN constituencies c ON c.constituency_id=w.constituency_id
             JOIN counties co ON co.county_id=c.county_id
-            LEFT JOIN latest_turnout t ON t.polling_station_id=ps.polling_station_id
-            LEFT JOIN latest_results lr ON lr.polling_station_id=ps.polling_station_id
             WHERE ps.election_id=%s AND ps.polling_station_id=ANY(%s)
-        ), station_turnout AS (
-            SELECT DISTINCT polling_station_id,ward_id,constituency_id,county_id,turnout FROM base
+        ), base_turnout AS (
+            SELECT sg.polling_station_id,sg.ward_id,sg.constituency_id,sg.county_id,
+                   t.position_id,t.voters_turnout turnout
+            FROM station_geography sg JOIN latest_turnout t ON t.polling_station_id=sg.polling_station_id
+        ), base_results AS (
+            SELECT sg.polling_station_id,sg.ward_id,sg.constituency_id,sg.county_id,
+                   lr.candidate_id,lr.position_id,lr.votes
+            FROM station_geography sg JOIN latest_results lr ON lr.polling_station_id=sg.polling_station_id
         ), derived AS (
-            SELECT 'WARD' level,ward_id geography_id,NULL::text candidate_id,NULL::text position_id,'TURNOUT' metric,SUM(turnout)::int value FROM station_turnout GROUP BY ward_id
-            UNION ALL SELECT 'CONSTITUENCY',constituency_id,NULL,NULL,'TURNOUT',SUM(turnout)::int FROM station_turnout GROUP BY constituency_id
-            UNION ALL SELECT 'COUNTY',county_id,NULL,NULL,'TURNOUT',SUM(turnout)::int FROM station_turnout GROUP BY county_id
-            UNION ALL SELECT 'NATIONAL','NATIONAL',NULL,NULL,'TURNOUT',SUM(turnout)::int FROM station_turnout
-            UNION ALL SELECT 'WARD',ward_id,candidate_id,position_id,'CANDIDATE_VOTES',SUM(votes)::int FROM base WHERE position_id='POS-MCA' GROUP BY ward_id,candidate_id,position_id
-            UNION ALL SELECT 'CONSTITUENCY',constituency_id,candidate_id,position_id,'CANDIDATE_VOTES',SUM(votes)::int FROM base WHERE position_id='POS-MP' GROUP BY constituency_id,candidate_id,position_id
-            UNION ALL SELECT 'COUNTY',county_id,candidate_id,position_id,'CANDIDATE_VOTES',SUM(votes)::int FROM base WHERE position_id IN('POS-WOMEN-REP','POS-SENATOR','POS-GOVERNOR') GROUP BY county_id,candidate_id,position_id
-            UNION ALL SELECT 'NATIONAL','NATIONAL',candidate_id,position_id,'CANDIDATE_VOTES',SUM(votes)::int FROM base WHERE position_id='POS-PRESIDENT' GROUP BY candidate_id,position_id
+            SELECT 'WARD' level,ward_id geography_id,NULL::text candidate_id,position_id,'TURNOUT' metric,SUM(turnout)::int value
+              FROM base_turnout GROUP BY ward_id,position_id
+            UNION ALL SELECT 'CONSTITUENCY',constituency_id,NULL,position_id,'TURNOUT',SUM(turnout)::int
+              FROM base_turnout GROUP BY constituency_id,position_id
+            UNION ALL SELECT 'COUNTY',county_id,NULL,position_id,'TURNOUT',SUM(turnout)::int
+              FROM base_turnout GROUP BY county_id,position_id
+            UNION ALL SELECT 'NATIONAL','NATIONAL',NULL,position_id,'TURNOUT',SUM(turnout)::int
+              FROM base_turnout GROUP BY position_id
+            UNION ALL SELECT 'WARD',ward_id,candidate_id,position_id,'CANDIDATE_VOTES',SUM(votes)::int
+              FROM base_results WHERE position_id='POS-MCA' GROUP BY ward_id,candidate_id,position_id
+            UNION ALL SELECT 'CONSTITUENCY',constituency_id,candidate_id,position_id,'CANDIDATE_VOTES',SUM(votes)::int
+              FROM base_results WHERE position_id='POS-MP' GROUP BY constituency_id,candidate_id,position_id
+            UNION ALL SELECT 'COUNTY',county_id,candidate_id,position_id,'CANDIDATE_VOTES',SUM(votes)::int
+              FROM base_results WHERE position_id IN('POS-WOMEN-REP','POS-SENATOR','POS-GOVERNOR') GROUP BY county_id,candidate_id,position_id
+            UNION ALL SELECT 'NATIONAL','NATIONAL',candidate_id,position_id,'CANDIDATE_VOTES',SUM(votes)::int
+              FROM base_results WHERE position_id='POS-PRESIDENT' GROUP BY candidate_id,position_id
         )
         SELECT p.aggregation_level,p.geography_id,p.candidate_id,p.position_id,p.metric,
                d.value derived_value,p.reported_value
@@ -411,6 +465,10 @@ def aggregate_findings(cur,election_id:str,scope:AuditScope,station_ids:set[str]
     out=[]
     for r in rows:
         level,gid,pid=r["aggregation_level"],r["geography_id"],r["position_id"]
+        # Legacy station-wide turnout aggregates predate the position-specific
+        # contract; preserve them as history but do not compare them to any one
+        # position's current stream.
+        if r["metric"]=="TURNOUT" and pid is None:continue
         if (level,gid) not in allowed:continue
         if scope.position_id and pid not in (None,scope.position_id):continue
         if scope.candidate_id and r["candidate_id"] not in (None,scope.candidate_id):continue
@@ -422,6 +480,140 @@ def aggregate_findings(cur,election_id:str,scope:AuditScope,station_ids:set[str]
         out.append(Finding(codes[level],PASSED if ok else FAILED,
             f"{subject}: derived {metric.lower()} {derived if derived is not None else 'missing'}; published {published}.",
             derived,published,None,r["candidate_id"],level,gid,pid,"Derived Value","Published Value"))
+    return out
+
+
+def form34a_findings(cur,election_id:str,station_ids:set[str],position_id:str|None)->list[Finding]:
+    """Audit the reported/transcribed Form 34A values without rewriting them."""
+    if not station_ids or (position_id and position_id!="POS-PRESIDENT"):
+        return []
+    forms=cur.execute("""
+        SELECT f.*,ps.polling_station_code,
+               COALESCE(rv.registered_voters,ps.registered_voters) official_registered_voters
+        FROM form34a_observations f
+        JOIN polling_stations ps
+          ON ps.polling_station_id=f.polling_station_id AND ps.election_id=f.election_id
+        LEFT JOIN LATERAL (
+            SELECT registered_voters
+            FROM registered_voter_observations rv
+            WHERE rv.election_id=f.election_id AND rv.polling_station_id=f.polling_station_id
+            ORDER BY observation_version DESC LIMIT 1
+        ) rv ON TRUE
+        WHERE f.election_id=%s AND f.polling_station_id=ANY(%s)
+        ORDER BY f.polling_station_id,f.observation_version
+    """,(election_id,list(station_ids))).fetchall()
+    if not forms:
+        return []
+    ids=[r["form34a_observation_id"] for r in forms]
+    rollups=cur.execute("""
+        SELECT form34a_observation_id,COUNT(*)::INTEGER row_count,
+               COUNT(*) FILTER(WHERE votes_status='PRESENT')::INTEGER present_count,
+               SUM(votes_reported) FILTER(WHERE votes_status='PRESENT')::BIGINT candidate_vote_sum
+        FROM form34a_candidate_votes
+        WHERE election_id=%s AND form34a_observation_id=ANY(%s)
+        GROUP BY form34a_observation_id
+    """,(election_id,ids)).fetchall()
+    candidate_map={r["form34a_observation_id"]:r for r in rollups}
+    detail_rows=cur.execute("""
+        SELECT form34a_observation_id,COUNT(*)::INTEGER row_count,
+               COUNT(*) FILTER(WHERE serial_capture_status='PRESENT')::INTEGER serial_count
+        FROM form34a_disputed_vote_decisions
+        WHERE election_id=%s AND form34a_observation_id=ANY(%s)
+        GROUP BY form34a_observation_id
+    """,(election_id,ids)).fetchall()
+    detail_map={r["form34a_observation_id"]:r for r in detail_rows}
+    out=[]
+    def add(form,code,status,message,actual=None,comparison=None,actual_label="Actual Value",comparison_label="Comparison Value"):
+        sid=form["polling_station_id"]
+        out.append(Finding(code,status,message,actual,comparison,sid,None,"POLLING_STATION",sid,"POS-PRESIDENT",
+                           actual_label,comparison_label))
+    for f in forms:
+        fid=f["form34a_observation_id"]; sid=f["polling_station_id"]
+        roll=candidate_map.get(fid)
+        row_count=roll["row_count"] if roll else 0
+        captured=roll["present_count"] if roll else 0
+        candidate_sum=int(roll["candidate_vote_sum"] or 0) if roll else None
+        candidate_complete=bool(roll and row_count>0 and captured==row_count)
+        candidate_total=f["candidate_table_valid_total_reported"] if f["candidate_table_valid_total_status"]=="PRESENT" else None
+        if candidate_complete and candidate_total is not None:
+            ok=candidate_sum==candidate_total
+            add(f,"F34A-001",PASSED if ok else FAILED,
+                f"{sid} Form 34A observation {fid}: candidate-row sum {candidate_sum} {'matches' if ok else 'does not match'} candidate-table valid total {candidate_total}.",
+                candidate_sum,candidate_total,"Candidate Vote Sum","Candidate-table Valid Total")
+        else:
+            add(f,"F34A-001",WARNING,
+                f"{sid} Form 34A observation {fid}: candidate-total check is incomplete; {captured}/{row_count} vote rows have PRESENT values and the printed total state is {f['candidate_table_valid_total_status']}.",
+                candidate_sum,candidate_total,"Candidate Vote Sum","Candidate-table Valid Total")
+        counts_total=f["counts_valid_total_reported"] if f["counts_valid_total_status"]=="PRESENT" else None
+        if candidate_total is not None and counts_total is not None:
+            ok=candidate_total==counts_total
+            add(f,"F34A-002",PASSED if ok else FAILED,
+                f"{sid} Form 34A observation {fid}: candidate-table total {candidate_total} {'matches' if ok else 'differs from'} the counts-section valid total {counts_total}.",
+                candidate_total,counts_total,"Candidate-table Valid Total","Counts-section Valid Total")
+        else:
+            add(f,"F34A-002",WARNING,f"{sid} Form 34A observation {fid}: the two printed valid-vote totals cannot be compared because one or both fields are not PRESENT.",
+                candidate_total,counts_total,"Candidate-table Valid Total","Counts-section Valid Total")
+        rejected=f["rejected_ballots_reported"] if f["rejected_ballots_status"]=="PRESENT" else None
+        objected=f["rejection_objected_to_reported"] if f["rejection_objected_to_status"]=="PRESENT" else None
+        if rejected is not None and objected is not None:
+            ok=objected<=rejected
+            add(f,"F34A-003",PASSED if ok else FAILED,
+                f"{sid} Form 34A observation {fid}: rejection-objected-to count {objected} {'does not exceed' if ok else 'exceeds'} rejected-ballot count {rejected}; it is not a second ballot pool.",
+                objected,rejected,"Rejection Objected To","Rejected Ballots")
+        else:
+            add(f,"F34A-003",WARNING,f"{sid} Form 34A observation {fid}: rejected and rejection-objected-to counts are not both PRESENT.",
+                objected,rejected,"Rejection Objected To","Rejected Ballots")
+        reported_registered=f["registered_voters_reported"] if f["registered_voters_status"]=="PRESENT" else None
+        if counts_total is not None and rejected is not None and reported_registered is not None:
+            votes_cast=counts_total+rejected
+            ok=votes_cast<=reported_registered
+            add(f,"F34A-004",PASSED if ok else FAILED,
+                f"{sid} Form 34A observation {fid}: derived votes-cast estimate (valid {counts_total} + rejected {rejected}) is {votes_cast}; registered voters reported are {reported_registered}.",
+                votes_cast,reported_registered,"Derived Votes-cast Estimate","Registered Voters Reported")
+        else:
+            add(f,"F34A-004",WARNING,f"{sid} Form 34A observation {fid}: votes-cast bound is incomplete because valid, rejected or registered-voter fields are not PRESENT.",
+                None,reported_registered,"Derived Votes-cast Estimate","Registered Voters Reported")
+        official=f["official_registered_voters"]
+        if reported_registered is not None and official is not None:
+            ok=reported_registered==official
+            add(f,"F34A-005",PASSED if ok else FAILED,
+                f"{sid} Form 34A observation {fid}: form reports {reported_registered} registered voters; station/register reference reports {official}.",
+                reported_registered,official,"Form Registered Voters","Reference Registered Voters")
+        else:
+            add(f,"F34A-005",WARNING,f"{sid} Form 34A observation {fid}: registered-voter reference comparison is incomplete.",
+                reported_registered,official,"Form Registered Voters","Reference Registered Voters")
+        printed_code=(f["printed_station_code"] or "").strip().casefold()
+        official_code=(f["polling_station_code"] or "").strip().casefold()
+        if printed_code:
+            ok=printed_code==official_code
+            add(f,"F34A-006",PASSED if ok else FAILED,
+                f"{sid} Form 34A observation {fid}: printed station code {f['printed_station_code']!r} {'matches' if ok else 'does not match'} selected station code {f['polling_station_code']!r}.",
+                1 if ok else 0,1,"Station-code Match","Required Match")
+        else:
+            add(f,"F34A-006",WARNING,f"{sid} Form 34A observation {fid}: printed polling-station code was not captured; station identity needs review.",
+                0,1,"Station-code Match","Required Match")
+        detail=detail_map.get(fid,{"row_count":0,"serial_count":0})
+        disputed=f["disputed_votes_reported"] if f["disputed_votes_status"]=="PRESENT" else None
+        if f["disputed_detail_status"]=="NOT_APPLICABLE":
+            pass
+        elif f["disputed_detail_status"]=="COMPLETE" and disputed is not None and detail["row_count"]==detail["serial_count"]:
+            ok=disputed==detail["serial_count"]
+            add(f,"F34A-007",PASSED if ok else FAILED,
+                f"{sid} Form 34A observation {fid}: disputed aggregate {disputed} {'matches' if ok else 'does not match'} {detail['serial_count']} fully captured serial/decision rows.",
+                detail["serial_count"],disputed,"Captured Disputed Rows","Disputed Votes Reported")
+        else:
+            add(f,"F34A-007",WARNING,f"{sid} Form 34A observation {fid}: disputed detail state is {f['disputed_detail_status']}; aggregate/detail reconciliation is incomplete.",
+                detail["serial_count"],disputed,"Captured Disputed Rows","Disputed Votes Reported")
+        signatures_ok=f["presiding_officer_signature_status"]=="SIGNED" and f["deputy_presiding_officer_signature_status"]=="SIGNED"
+        signatures_reviewed=f["presiding_officer_signature_status"]!="NOT_REVIEWED" and f["deputy_presiding_officer_signature_status"]!="NOT_REVIEWED"
+        signature_status=PASSED if signatures_ok else (FAILED if signatures_reviewed and "NOT_SIGNED" in (f["presiding_officer_signature_status"],f["deputy_presiding_officer_signature_status"]) else WARNING)
+        add(f,"F34A-008",signature_status,
+            f"{sid} Form 34A observation {fid}: signature review states are presiding officer={f['presiding_officer_signature_status']}, deputy presiding officer={f['deputy_presiding_officer_signature_status']}. This flag is not a legal conclusion.",
+            1 if signatures_ok else 0,1,"Both Signatures Marked Present","Source-review Expectation")
+        reviewed=f["review_status"]=="REVIEWED"
+        add(f,"F34A-009",PASSED if reviewed else WARNING,
+            f"{sid} Form 34A observation {fid}: extraction review state is {f['review_status']}; source-derived values remain separate from the original uploaded document.",
+            1 if reviewed else 0,1,"Extraction Reviewed","Reviewed Required")
     return out
 
 
@@ -649,8 +841,10 @@ def audit_election(election_id:str,scope:AuditScope)->tuple[int,list[dict],bool,
             rows=latest_station_contests(cur,election_id,stations)
             if not rows:raise ValueError("No contest-specific ballot observations were found.")
             add_latest_result_times(cur,election_id,rows)
-            findings=station_findings(rows,scope.position_id)
+            findings=position_turnout_findings(cur,election_id,stations)
+            findings.extend(station_findings(rows,scope.position_id))
             findings.extend(chronology_findings(rows,scope.position_id))
+            findings.extend(form34a_findings(cur,election_id,stations,scope.position_id))
             findings.extend(result_changes(cur,election_id,stations,scope.position_id,scope.candidate_id))
             findings.extend(integrity_findings(cur,election_id,stations,scope.position_id,scope.candidate_id))
             findings.extend(ballot_security_findings(cur,election_id,stations,scope.position_id))
