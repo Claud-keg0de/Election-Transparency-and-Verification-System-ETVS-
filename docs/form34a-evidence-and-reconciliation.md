@@ -1,6 +1,6 @@
 # Form 34A evidence model and reconciliation design
 
-**Status:** design specification for the next evidence-ingestion phase. This document describes how ETVS should model published Form 34A documents without confusing extracted official figures with the current form-driven data-entry observations. Dedicated Form 34A extraction/review tables and a Form 34A import interface are **not yet implemented** in the current schema/application.
+**Status:** implemented local evidence-capture foundation, with automated ingestion still planned. The current schema includes dedicated Form 34A extraction/review tables, and `/form34a` accepts an original PDF/image plus a manual transcription and review attribution. The six-position turnout form is available at `/turnout`. Nationwide retrieval, OCR/automatic extraction, and automatic mapping of Form 34A values into normalized contest tables are not yet implemented.
 
 ## 1. Purpose and trust boundary
 
@@ -57,7 +57,7 @@ The document record should retain the source organisation/type, URL or URI, retr
 
 A versioned transcription of what the document shows, with its source location and review state. This must not replace or silently update the document itself.
 
-**Proposed tables (not yet present):**
+**Implemented extraction tables:**
 
 - `form34a_observations`: one reviewed or reviewable Form 34A instance for one election/station/source-document occurrence.
 - `form34a_candidate_votes`: one row per candidate row printed on that Form 34A.
@@ -68,16 +68,16 @@ A dedicated form observation should keep both the printed station identity and t
 
 ### C. Normalized observations
 
-The current schema already has structured data tables for station-wide turnout, registered-voter observations, contest-specific ballot accounting and candidate results:
+The current schema has structured data tables for position-specific turnout, registered-voter observations, contest-specific ballot accounting and candidate results:
 
 - `registered_voter_observations`
 - `turnout_observations`
 - `ballot_accounting_observations`
 - `result_submissions`
 
-These tables support the existing human form-entry workflow. Before importing Form 34A values into them, implement and test a mapping that preserves the relationship to the exact source document and extraction revision. In particular, an imported Form 34A reported count must not silently replace a different station-wide turnout observation or a value entered from another evidence source.
+These tables support the normalized human-entry workflow. The current Form 34A transcription remains in source-specific tables; an automated mapping into normalized contest data is future work and must preserve the source document and extraction revision. A Form 34A count must never silently replace a separate position-turnout observation or a value entered from another evidence source.
 
-The generic `source_submissions` JSONB payload can preserve a source submission in the current architecture, but it is not a substitute for a reviewed, well-constrained Form 34A relational model when field-level extraction and disputed-vote decisions become first-class features.
+The generic `source_submissions` JSONB payload remains useful for generic published-source submissions. The dedicated `form34a_*` tables now provide constrained field-level extraction and disputed-vote decision capture.
 
 ### D. Audit findings
 
@@ -87,7 +87,7 @@ Existing `published_aggregate_totals` and `source_comparisons` are relevant for 
 
 ## 4. Proposed relationships
 
-The following is the target logical model. Names prefixed with `form34a_` in the diagram are proposed additions, not current schema objects.
+The diagram describes the implemented Form 34A relationships; migration 008 creates the observation, candidate-vote and disputed-vote tables, and migration 009 adds review attribution and append-only review events.
 
 ```mermaid
 erDiagram
@@ -106,7 +106,7 @@ erDiagram
     AUDIT_RUNS ||--o{ AUDIT_FINDINGS : produces
 ```
 
-### Proposed table responsibilities
+### Implemented Form 34A table responsibilities
 
 | Proposed table | One row represents | Key design requirements |
 |---|---|---|
@@ -267,15 +267,15 @@ Use summary views or materialized views for repeated aggregates, but always let 
 
 ## 11. Implementation sequence
 
-1. **Baseline and tests:** document the current schema contract and add test fixtures for every relevant Form 34A field, including blank, illegible and zero values.
-2. **Evidence model:** add a numbered migration and mirror it in `schema.sql` for form observations, candidate rows, disputed-vote decisions, and links to source documents. Update seed/reset behavior and `verify_project.py` together.
-3. **Importer:** add PDF registration and field extraction with page/region references. OCR output must stay reviewable; uncertain station/candidate matches go to review rather than silent inference.
-4. **Mapping and integrity:** map reviewed Form 34A candidate/count data to normalized observations without overwriting existing manual observations. Add explicit provenance and uniqueness/idempotency rules.
-5. **Audit layer:** add the `F34A-*` checks with tests; preserve the existing R001–R021 contracts and current status constraint until a deliberate migration changes them.
+1. **Baseline and tests:** keep field-level fixtures for PRESENT, BLANK, ILLEGIBLE and zero values.
+2. **Evidence model:** implemented in migration 008 and `schema.sql`, with seed/reset and verifier support. Review attribution and events are implemented in migration 009.
+3. **Remaining importer:** add optional PDF/OCR extraction with page/region references. OCR output must remain reviewable; uncertain station/candidate matches go to review instead of silent inference.
+4. **Mapping and integrity:** map reviewed Form 34A candidate/count data to normalized observations without overwriting manual observations; retain provenance and uniqueness/idempotency.
+5. **Audit layer:** `F34A-*` findings are implemented in `audit_engine.py`; preserve existing R001–R021 contracts.
 6. **Cross-source reconciliation:** compare duplicate source copies, registered-voter references, rejection statements and Form 34B/34C aggregates.
-7. **Public reporting:** expose evidence coverage and rule-level findings first; add PostGIS and heat-map rendering after location provenance and summary-query performance are defined.
+7. **Public reporting:** expose evidence coverage and rule-level findings first; add PostGIS and heat-map rendering after location provenance and query performance are defined.
 
-Do not call Form 34A ingestion production-ready until schema, migration, seed/reset, verifier, importer and audit tests agree on the same contract.
+The local capture workflow is covered by the PostgreSQL CI smoke test. Do not call automated or nationwide Form 34A ingestion production-ready until source retrieval, extraction, mapping, cross-source reconciliation and access controls are designed and tested.
 
 ## 12. Primary source references
 
