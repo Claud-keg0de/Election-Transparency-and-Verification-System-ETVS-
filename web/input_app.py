@@ -6,6 +6,9 @@ fixture tool rather than the source-entry interface.
 from __future__ import annotations
 import os
 import secrets
+from pathlib import Path
+from urllib.parse import urlparse
+from werkzeug.utils import secure_filename
 from datetime import datetime, timezone
 import blake3
 import psycopg
@@ -16,6 +19,10 @@ app = Flask(__name__)
 app.config["SECRET_KEY"] = os.getenv("ETVS_FLASK_SECRET") or secrets.token_hex(32)
 app.jinja_env.autoescape = True
 POSITIONS=("POS-PRESIDENT","POS-GOVERNOR","POS-SENATOR","POS-WOMEN-REP","POS-MP","POS-MCA")
+CAPTURE_STATES=("PRESENT","BLANK","ILLEGIBLE","NOT_CAPTURED")
+SIGNATURE_STATES=("SIGNED","NOT_SIGNED","ILLEGIBLE","NOT_REVIEWED")
+ALLOWED_UPLOAD_EXTENSIONS={".pdf",".png",".jpg",".jpeg",".webp"}
+app.config["MAX_CONTENT_LENGTH"] = int(os.getenv("ETVS_MAX_UPLOAD_BYTES",str(25*1024*1024)))
 
 SHELL="""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ETVS Source Input</title><style>
@@ -27,7 +34,7 @@ input,select{width:100%;box-sizing:border-box;padding:.6rem;border:1px solid #aa
 .error{background:#ffe9e9;border:1px solid #cc7777}.ok{background:#e9f7e9;border:1px solid #77aa77}
 table{width:100%;border-collapse:collapse}th,td{padding:.5rem;border-bottom:1px solid #ddd;text-align:left}.small{font-size:.9rem;color:#555}
 </style></head><body><h1>ETVS Source Input</h1><nav>
-<a href="/">Dashboard</a><a href="/polling-stations/new">Polling Station</a><a href="/turnout">Turnout / Votes Cast</a><a href="/contest">Results + Ballot Accounting</a>
+<a href="/">Dashboard</a><a href="/polling-stations/new">Polling Station</a><a href="/form34a">Form 34A Evidence</a><a href="/turnout">Turnout by Position</a><a href="/contest">Results + Ballot Accounting</a>
 </nav>{% if message %}<div class="notice {{'error' if error else 'ok'}}">{{message}}</div>{% endif %}{{body|safe}}</body></html>"""
 
 def db():
@@ -45,6 +52,19 @@ def nonneg(name,value):
     n=int(value)
     if n<0: raise ValueError(f"{name} cannot be negative.")
     return n
+
+def captured_count(field,label):
+    """Return a nullable number and explicit source-field capture state."""
+    state=request.form.get(field+"_status","PRESENT").strip().upper()
+    if state not in CAPTURE_STATES:
+        raise ValueError(f"{label} has an invalid capture state.")
+    raw=(request.form.get(field) or "").strip()
+    if state=="PRESENT":
+        return nonneg(label,raw),state
+    if raw:
+        raise ValueError(f"{label}: clear the numeric value when state is {state}.")
+    return None,state
+
 def render(body,message=None,error=False): return render_template_string(SHELL,body=body,message=message,error=error)
 
 @app.get("/")
@@ -106,29 +126,40 @@ def turnout():
     message=None; error=False
     with db() as c,c.cursor() as q:
         stations=q.execute("SELECT polling_station_id,polling_station_code,election_id,registered_voters FROM polling_stations ORDER BY polling_station_code").fetchall()
+        positions=q.execute("SELECT position_id,position_name FROM positions WHERE position_id=ANY(%s) ORDER BY observation_sequence NULLS LAST,position_id",(list(POSITIONS),)).fetchall()
+        sid=request.values.get("polling_station_id",""); pid=request.values.get("position_id","")
         if request.method=="POST":
             try:
-                sid=request.form["polling_station_id"]; value=nonneg("Turnout",request.form.get("voters_turnout"))
+                sid=request.form["polling_station_id"]; pid=request.form["position_id"]
+                if pid not in POSITIONS: raise ValueError("Select a supported electoral position.")
+                value=nonneg("Turnout / voters cast",request.form.get("voters_turnout"))
                 st=q.execute("SELECT * FROM polling_stations WHERE polling_station_id=%s",(sid,)).fetchone()
                 if not st: raise ValueError("Polling station does not exist.")
-                if value>st["registered_voters"]: raise ValueError("Turnout/votes cast cannot exceed registered voters.")
-                previous=q.execute("SELECT observed_at FROM turnout_observations WHERE election_id=%s AND polling_station_id=%s ORDER BY observation_version DESC LIMIT 1",
-                                   (st["election_id"],sid)).fetchone()
+                if value>st["registered_voters"]: raise ValueError("Position turnout cannot exceed the station's registered-voter reference.")
+                previous=q.execute("""SELECT observed_at FROM turnout_observations
+                                      WHERE election_id=%s AND polling_station_id=%s AND position_id=%s
+                                      ORDER BY observation_version DESC LIMIT 1""",(st["election_id"],sid,pid)).fetchone()
                 t=now()
                 if previous is not None:
                     elapsed=(t-previous["observed_at"]).total_seconds()/60
                     if elapsed < st["turnout_reporting_interval_minutes"]:
-                        raise ValueError(f"Next turnout observation is not due yet. The station interval is {st['turnout_reporting_interval_minutes']} minutes; only {elapsed:.1f} minutes have elapsed.")
-                v=q.execute("SELECT COALESCE(MAX(observation_version),0)+1 AS v FROM turnout_observations WHERE election_id=%s AND polling_station_id=%s",
-                            (st["election_id"],sid)).fetchone()["v"]
-                h=hash_input("TURNOUT",st["election_id"],sid,v,value,t.isoformat())
-                q.execute("""INSERT INTO turnout_observations(election_id,polling_station_id,observation_version,voters_turnout,observed_at,input_hash)
-                             VALUES(%s,%s,%s,%s,%s,%s)""",(st["election_id"],sid,v,value,t,h))
-                c.commit(); message=f"Turnout {value} saved for {sid}."
+                        raise ValueError(f"Next {pid} turnout observation is not due yet. This station's configured interval is {st['turnout_reporting_interval_minutes']} minutes; only {elapsed:.1f} minutes have elapsed.")
+                v=q.execute("""SELECT COALESCE(MAX(observation_version),0)+1 AS v FROM turnout_observations
+                               WHERE election_id=%s AND polling_station_id=%s AND position_id=%s""",(st["election_id"],sid,pid)).fetchone()["v"]
+                h=hash_input("TURNOUT",st["election_id"],sid,pid,v,value,t.isoformat())
+                q.execute("""INSERT INTO turnout_observations(election_id,polling_station_id,position_id,observation_version,
+                             voters_turnout,observed_at,input_hash,source_reference)
+                             VALUES(%s,%s,%s,%s,%s,%s,%s,%s)""",
+                          (st["election_id"],sid,pid,v,value,t,h,"MANUAL_POSITION_TURNOUT"))
+                c.commit(); message=f"{pid}: turnout {value} saved for {sid} (observation version {v})."
             except Exception as exc: c.rollback(); error=True; message=str(exc)
-    body=render_template_string("""<section><h2>Turnout / votes cast</h2><p class="small">Turnout is a variable observed input recorded at the station's configured interval; ETVS never derives it from registered voters.</p>
-    <form method="post"><label>Polling station</label><select name="polling_station_id">{% for s in stations %}<option value="{{s.polling_station_id}}">{{s.polling_station_code}} — registered {{s.registered_voters}}</option>{% endfor %}</select>
-    <label>Voters who cast a ballot (turnout)</label><input name="voters_turnout" type="number" min="0" required><button type="submit">Save turnout</button></form></section>""",stations=stations)
+    body=render_template_string("""<section><h2>Turnout / votes cast by electoral position</h2>
+    <p class="small">Record a separate turnout observation for each polling station and each ballot position: President, Governor, Senator, Woman Representative, MP and MCA. The six figures may differ. ETVS does not copy one position's turnout into another position.</p>
+    <form method="post"><div class="grid"><div><label>Polling station</label><select name="polling_station_id" required>{% for s in stations %}<option value="{{s.polling_station_id}}" {% if s.polling_station_id==sid %}selected{% endif %}>{{s.polling_station_code}} — {{s.polling_station_id}} — registered {{s.registered_voters}}</option>{% endfor %}</select></div>
+    <div><label>Electoral position / ballot</label><select name="position_id" required>{% for p in positions %}<option value="{{p.position_id}}" {% if p.position_id==pid %}selected{% endif %}>{{p.position_name}} ({{p.position_id}})</option>{% endfor %}</select></div></div>
+    <label>Voters who cast a ballot for this position</label><input name="voters_turnout" type="number" min="0" required>
+    <p class="small">Enter the value supported by the relevant source. The configured ETVS reporting interval is enforced separately for each station/position stream.</p>
+    <button type="submit">Save position turnout</button></form></section>""",stations=stations,positions=positions,sid=sid,pid=pid)
     return render(body,message,error)
 
 @app.get("/health/db")
