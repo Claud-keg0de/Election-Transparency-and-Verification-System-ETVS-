@@ -38,13 +38,14 @@ The local form-driven source-entry workflow includes the following input forms:
 
 The structured results/accounting contract for each selected station and electoral position is:
 
-- `valid_votes = SUM(candidate valid votes)` for the contest; candidate-assigned disputed votes are stored separately.
-- `voters_turnout = valid_votes + rejected_votes + protested_votes`.
-- Protested votes are excluded from valid votes; disputed votes are attributed to a candidate but are not automatically treated as valid.
+- `valid_votes = SUM(candidate votes)` for the contest, including disputed votes assigned to candidates.
+- `voters_turnout = valid_votes + rejected_votes + unresolved_protested_votes`.
+- `disputed_votes` is a subset of that candidate's recorded vote total; it is included in valid votes and must not be added again.
+- `protested_votes` records only unresolved protested votes not yet assigned to a candidate; these remain outside valid votes until resolved.
 - Spoilt ballots are stored separately and do not count as votes cast.
 - Turnout is entered independently for each station/position stream; ETVS never copies the President's figure into another contest.
 
-The application uses a normalized polling-station register and generic source-document provenance. It does not provide a dedicated Form 34A upload/transcription/review workflow. Candidate valid votes and candidate-assigned disputed votes are stored separately from contest-level protested votes.
+The application uses a normalized polling-station register and generic source-document provenance. It does not provide a dedicated Form 34A upload/transcription/review workflow. Candidate vote totals include disputed votes assigned to that candidate; the disputed count is recorded as a subset, not added twice. The contest-level protested count represents only unresolved protested votes.
 
 ## Architecture and data integrity principles
 
