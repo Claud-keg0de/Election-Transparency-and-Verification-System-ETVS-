@@ -12,7 +12,7 @@ from werkzeug.utils import secure_filename
 from datetime import datetime, timezone
 import blake3
 import psycopg
-from flask import Flask, render_template_string, request
+from flask import Flask, redirect, render_template_string, request, url_for
 from psycopg.rows import dict_row
 
 app = Flask(__name__)
@@ -356,6 +356,16 @@ def form34a():
                 message=f"Form 34A evidence saved for {sid}: observation {observation_id}, source document {doc_id}. Audit status remains UNREVIEWED until source values are reviewed."
             except Exception as exc:
                 conn.rollback(); error=True; message=str(exc)
+        recent_forms=q.execute("""
+            SELECT f.form34a_observation_id,f.election_id,f.observation_version,f.printed_form_serial,
+                   f.review_status,f.reviewed_by,f.created_at,d.document_name,d.content_hash,
+                   ps.polling_station_code,ps.polling_station_id
+            FROM form34a_observations f
+            JOIN source_documents d ON d.document_id=f.source_document_id
+            JOIN polling_stations ps ON ps.polling_station_id=f.polling_station_id AND ps.election_id=f.election_id
+            ORDER BY f.created_at DESC,f.form34a_observation_id DESC
+            LIMIT 30
+        """).fetchall()
     body=render_template_string("""<section><h2>Capture Form 34A evidence</h2>
     <p class="notice">Upload the original Form 34A PDF or scan, then transcribe exactly what is printed. ETVS stores the file locally and records its BLAKE3-256 hash. Uploaded files and source URLs are not independently authenticated. The original evidence and the transcription remain separate.</p>
     <form method="post" enctype="multipart/form-data">
@@ -383,15 +393,60 @@ def form34a():
     <button type="button" onclick="addDisputedRow()">Add disputed-vote row</button>
     <template id="disputed-row-template"><tr class="disputed-row"><td><input name="disputed_serial"></td><td><select name="disputed_serial_status"><option value="NOT_CAPTURED">Not captured</option><option value="PRESENT">Present</option><option value="ILLEGIBLE">Illegible</option></select></td><td><select name="disputed_candidate_id"><option value="">Unmatched / review</option>{% for x in candidates %}<option value="{{x.candidate_id}}">{{x.candidate_name}}</option>{% endfor %}</select></td><td><input name="disputed_candidate_name"></td></tr></template>
     <button type="submit">Save Form 34A source and transcription</button></form></section>
+    <section><h3>Recent Form 34A records</h3>
+    <p class="small">Review attribution records the name entered by the local operator; it is not authenticated identity.</p>
+    <table><thead><tr><th>Station / observation</th><th>Source</th><th>Review status</th><th>Review action</th></tr></thead><tbody>
+    {% for f in recent_forms %}<tr><td>{{f.polling_station_code}}<br><span class="small">{{f.election_id}} · observation {{f.form34a_observation_id}} · version {{f.observation_version}}</span></td>
+    <td>{{f.document_name}}<br><span class="small">BLAKE3-256 {{f.content_hash[:16]}}…</span></td>
+    <td>{{f.review_status}}{% if f.reviewed_by %}<br><span class="small">by {{f.reviewed_by}}</span>{% endif %}</td>
+    <td>{% if f.review_status!='REVIEWED' %}<form method="post" action="/form34a/{{f.form34a_observation_id}}/review" class="review-form">
+    <input name="reviewer_name" required placeholder="Reviewer name">
+    <input name="review_notes" placeholder="Review note (optional)">
+    <button type="submit">Mark reviewed</button></form>{% else %}<span class="small">Reviewed</span>{% endif %}</td></tr>
+    {% else %}<tr><td colspan="4">No Form 34A evidence has been captured yet.</td></tr>{% endfor %}
+    </tbody></table></section>
     <script>
-    function syncCapture(box){const state=box.querySelector('.capture-state');const value=box.querySelector('.capture-value');if(state&&value)value.required=state.value==='PRESENT';}
+    function syncCap@app.post("/form34a/<int:observation_id>/review")
+def review_form34a(observation_id:int):
+    """Record a local human review with an append-only event."""
+    reviewer=(request.form.get("reviewer_name") or "").strip()
+    notes=(request.form.get("review_notes") or "").strip() or None
+    if not reviewer:
+        return render("<section><h2>Review not saved</h2><p>A reviewer name is required.</p><p><a href='/form34a'>Return to Form 34A</a></p></section>",
+                      "Enter a reviewer name.",True),400
+    if len(reviewer)>200 or (notes and len(notes)>4000):
+        return render("<section><h2>Review not saved</h2><p>Reviewer name or note exceeds the allowed length.</p><p><a href='/form34a'>Return to Form 34A</a></p></section>",
+                      "Reviewer name must be at most 200 characters and notes at most 4000 characters.",True),400
+    with db() as conn,conn.cursor() as q:
+        form=q.execute("""SELECT form34a_observation_id,election_id,polling_station_id,review_status
+                          FROM form34a_observations WHERE form34a_observation_id=%s FOR UPDATE""",
+                       (observation_id,)).fetchone()
+        if form is None:
+            return render("<section><h2>Form 34A not found</h2><p><a href='/form34a'>Return to Form 34A</a></p></section>",
+                          "The requested Form 34A observation does not exist.",True),404
+        timestamp=now()
+        q.execute("""UPDATE form34a_observations
+                     SET review_status='REVIEWED',reviewed_by=%s,reviewed_at=%s,review_notes=%s
+                     WHERE form34a_observation_id=%s""",
+                  (reviewer,timestamp,notes,observation_id))
+        q.execute("""INSERT INTO form34a_review_events(
+                       form34a_observation_id,election_id,previous_review_status,new_review_status,
+                       reviewer_name,review_notes,reviewed_at)
+                     VALUES(%s,%s,%s,'REVIEWED',%s,%s,%s)""",
+                  (observation_id,form["election_id"],form["review_status"],reviewer,notes,timestamp))
+        conn.commit()
+        sid=form["polling_station_id"]
+    return redirect(url_for("form34a",polling_station_id=sid))
+
+
+ture(box){const state=box.querySelector('.capture-state');const value=box.querySelector('.capture-value');if(state&&value)value.required=state.value==='PRESENT';}
     function syncCandidate(row){const state=row.querySelector('.candidate-state');const value=row.querySelector('.candidate-votes');const name=row.querySelector('.candidate-name');if(state&&value)value.required=state.value==='PRESENT';if(state&&name)name.required=state.value==='PRESENT';}
     document.querySelectorAll('.capture-state').forEach(el=>{syncCapture(el.closest('div'));el.addEventListener('change',()=>syncCapture(el.closest('div')));});
     document.querySelectorAll('.candidate-row').forEach(syncCandidate);
     document.addEventListener('change',e=>{if(e.target.classList.contains('candidate-state'))syncCandidate(e.target.closest('.candidate-row'));});
     function addCandidateRow(){document.getElementById('candidate-rows').appendChild(document.getElementById('candidate-row-template').content.cloneNode(true));document.querySelectorAll('.candidate-row').forEach(syncCandidate);}
     function addDisputedRow(){document.getElementById('disputed-rows').appendChild(document.getElementById('disputed-row-template').content.cloneNode(true));}
-    </script>""",stations=stations,sid=sid,station=station,candidates=candidates,fields=(
+    </script>""",stations=stations,sid=sid,station=station,candidates=candidates,recent_forms=recent_forms,fields=(
         ("registered_voters_reported","Registered voters"),
         ("candidate_table_valid_total_reported","Candidate table total valid votes"),
         ("rejected_ballots_reported","Rejected ballot papers"),
