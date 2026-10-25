@@ -16,17 +16,55 @@ The four permitted input areas are:
 4. **Ballot accounting** — rejected and spoilt ballots for that contest; ETVS
    derives valid votes from the candidate totals.
 
-### Accounting identity
+### Current application accounting identity
 
-For every station and contest:
+For every station and contest in this current manual-input workflow:
 
-`valid votes = SUM(candidate votes)`
-
-`turnout = valid votes + rejected ballots`
+```text
+valid votes = SUM(candidate votes)
+turnout = valid votes + rejected ballots
+```
 
 Spoilt ballots are stored separately and are **never treated as votes cast**.
 
 Turnout is shared by the station's six contests; it is not entered six times.
+
+This is the current ETVS application/input contract. Do not assume that every
+field is printed on every statutory election form.
+
+## Published Form 34A import is a separate workflow
+
+The existing source-entry interface is **not yet** a nationwide Form 34A PDF
+importer. Published-document ingestion needs to retain the original file,
+source URI, retrieval timestamp, BLAKE3-256 content hash, extraction revision,
+printed station identity, field-capture state and human-review history before
+it contributes data to the audit.
+
+See [Form 34A evidence model and reconciliation design](form34a-evidence-and-reconciliation.md)
+for the statutory fields, proposed relational tables, audit identities,
+cross-source reconciliation and implementation sequence.
+
+The source-specific distinctions matter:
+
+- Form 34A separately reports candidate votes, total valid votes, registered
+  voters, rejected ballots, rejection-objected-to ballots and disputed votes,
+  and can list disputed ballot serial numbers and their assigned candidates.
+- The rejection-objected-to count must not be added a second time to rejected
+  ballots when calculating votes cast. A rejection that is objected to remains
+  rejected for the polling-station declaration under the applicable regulation.
+- Disputed ballots counted by the presiding officer are treated as valid for
+  the station declaration. Their count is not an additional vote pool to add
+  on top of candidate totals.
+- The Form 34A polling-station counts block does not contain a distinct
+  spoilt-ballot field. Do not claim a spoilt count was extracted from this form.
+- A blank or illegible printed value is not a numeric zero. A published source
+  observation must not silently overwrite a separate turnout observation
+  obtained through the manual input workflow.
+
+The importer should preserve the source and extract into source-specific
+observations first. A reviewed mapping into existing normalized tables must be
+implemented and tested before the importer is allowed to populate the same
+tables as human-entered observations.
 
 ## Turnout interval
 
@@ -54,7 +92,9 @@ through the existing VirtualBox NAT forwarding, the DBeaver connection uses
 
 Run:
 
-`python tools/check_db_connection.py`
+```bash
+python tools/check_db_connection.py
+```
 
 A successful check reports **STATUS: CONNECTED** and the number of geography,
 station, turnout, result and accounting records.
@@ -78,11 +118,27 @@ PostgreSQL records -> DBeaver visibility -> audit engine**
 No source-entry data should be inserted into `seed.py` merely to make it appear
 in DBeaver.
 
-
 ## Cross-file consistency checks
 
-The result-entry form and `audit_engine.py` use the same canonical BLAKE3-256 result fingerprint payload: `RESULT | election_id | polling_station_id | candidate_id | result_version | votes`. This is what audit rule R010 verifies.
+The result-entry form and `audit_engine.py` use the same canonical BLAKE3-256
+result fingerprint payload:
 
-The polling-station form reuses an existing registration centre when the same ward and registration-centre name are selected. This preserves the schema relationship where one registration centre can contain multiple polling stations.
+```text
+RESULT | election_id | polling_station_id | candidate_id | result_version | votes
+```
 
-For the complete reference-data validation, run `python verify_project.py KE-PRES-2027 --strict-reference-data` after loading the 47/290/1450 geography and the prison/diaspora reference migration.
+This is what audit rule R010 verifies.
+
+The polling-station form reuses an existing registration centre when the same
+ward and registration-centre name are selected. This preserves the schema
+relationship where one registration centre can contain multiple polling
+stations.
+
+For the complete reference-data validation, run:
+
+```bash
+python verify_project.py KE-PRES-2027 --strict-reference-data
+```
+
+Run this after loading the 47/290/1450 geography and the prison/diaspora
+reference migration.
