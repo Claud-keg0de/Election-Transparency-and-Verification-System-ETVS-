@@ -477,22 +477,6 @@ def review_form34a(observation_id:int):
     return redirect(url_for("form34a",polling_station_id=sid))
 
 
-ture(box){const state=box.querySelector('.capture-state');const value=box.querySelector('.capture-value');if(state&&value)value.required=state.value==='PRESENT';}
-    function syncCandidate(row){const state=row.querySelector('.candidate-state');const value=row.querySelector('.candidate-votes');const name=row.querySelector('.candidate-name');if(state&&value)value.required=state.value==='PRESENT';if(state&&name)name.required=state.value==='PRESENT';}
-    document.querySelectorAll('.capture-state').forEach(el=>{syncCapture(el.closest('div'));el.addEventListener('change',()=>syncCapture(el.closest('div')));});
-    document.querySelectorAll('.candidate-row').forEach(syncCandidate);
-    document.addEventListener('change',e=>{if(e.target.classList.contains('candidate-state'))syncCandidate(e.target.closest('.candidate-row'));});
-    function addCandidateRow(){document.getElementById('candidate-rows').appendChild(document.getElementById('candidate-row-template').content.cloneNode(true));document.querySelectorAll('.candidate-row').forEach(syncCandidate);}
-    function addDisputedRow(){document.getElementById('disputed-rows').appendChild(document.getElementById('disputed-row-template').content.cloneNode(true));}
-    </script>""",stations=stations,sid=sid,station=station,candidates=candidates,recent_forms=recent_forms,fields=(
-        ("registered_voters_reported","Registered voters"),
-        ("candidate_table_valid_total_reported","Candidate table total valid votes"),
-        ("rejected_ballots_reported","Rejected ballot papers"),
-        ("rejection_objected_to_reported","Rejection objected to"),
-        ("disputed_votes_reported","Disputed votes"),
-        ("counts_valid_total_reported","Counts-section total valid votes"),
-    ),capture_states=CAPTURE_STATES,signature_states=SIGNATURE_STATES,max_upload_mb=app.config["MAX_CONTENT_LENGTH"]//(1024*1024))
-    return render(body,message,error)
 
 
 @app.get("/health/db")
