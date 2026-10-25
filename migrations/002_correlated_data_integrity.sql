@@ -175,9 +175,9 @@ BEGIN
             missing_station;
     END IF;
 
-    -- Each contest ballot stream must explicitly point to the station's latest
-    -- turnout observation. This prevents accidental double-counting or mixing
-    -- turnout versions across the six ballot papers.
+    -- Each contest ballot stream must explicitly point to the latest turnout
+    -- observation for the SAME station and electoral position. Turnout is not
+    -- shared between the six ballot papers.
     SELECT ps.polling_station_id
       INTO missing_station
       FROM polling_stations ps
@@ -224,6 +224,7 @@ BEGIN
               FROM turnout_observations t
              WHERE t.election_id = ps.election_id
                AND t.polling_station_id = ps.polling_station_id
+               AND t.position_id = b.position_id
              ORDER BY t.observation_version DESC
              LIMIT 1
        )
@@ -231,7 +232,7 @@ BEGIN
 
     IF missing_position IS NOT NULL THEN
         RAISE EXCEPTION
-            'ETVS audit blocked: ballot accounting position % does not reference the station final turnout observation',
+            'ETVS audit blocked: ballot accounting position % does not reference the latest turnout observation for that position',
             missing_position;
     END IF;
 
