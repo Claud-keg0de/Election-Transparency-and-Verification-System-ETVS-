@@ -33,8 +33,8 @@ The local form-driven source-entry workflow includes the following input forms:
 
 1. Polling-station details, including the election, geography, station code, registered-voter reference and ETVS reporting interval.
 2. Independent, versioned turnout observations for each polling-station/electoral-position pair (President, Governor, Senator, Woman Representative, MP and MCA).
-3. Candidate results for a selected electoral position/contest.
-4. Contest-specific candidate results for the selected position.
+3. Form 34A PDF/image upload with manual transcription and review of its presidential polling-station fields.
+4. Candidate results for a selected electoral position/contest.
 5. Contest-specific ballot accounting, including valid, rejected and spoilt ballot counts.
 
 The structured results/accounting contract for each selected station and electoral position is:
