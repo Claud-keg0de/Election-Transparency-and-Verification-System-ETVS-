@@ -382,6 +382,7 @@ def reset_sample(cur) -> None:
         "DELETE FROM ballot_security_features WHERE ballot_specification_id IN (SELECT ballot_specification_id FROM ballot_specifications WHERE election_id=%s)",
         "DELETE FROM ballot_specifications WHERE election_id=%s",
         "DELETE FROM form34a_disputed_vote_decisions WHERE election_id=%s",
+        "DELETE FROM form34a_review_events WHERE election_id=%s",
         "DELETE FROM form34a_candidate_votes WHERE election_id=%s",
         "DELETE FROM form34a_observations WHERE election_id=%s",
         "DELETE FROM ballot_accounting_observations WHERE election_id=%s",
@@ -687,7 +688,7 @@ def check(cur)->None:
     print("\nETVS SEED VERIFICATION\n"+"="*82)
     tables=("positions","elections","counties","constituencies","wards","registration_centres","polling_stations",
             "registered_voter_observations","turnout_observations","form34a_observations","form34a_candidate_votes",
-            "form34a_disputed_vote_decisions","ballot_accounting_observations","ballot_specifications",
+            "form34a_disputed_vote_decisions","form34a_review_events","ballot_accounting_observations","ballot_specifications",
             "ballot_security_features","ballot_stock_batches","ballot_units","ballot_security_observations",
             "candidates","result_submissions","published_aggregate_totals","audit_runs","audit_findings")
     for table in tables:
