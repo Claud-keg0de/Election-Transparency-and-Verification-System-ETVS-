@@ -90,8 +90,10 @@ def digest(*parts: object) -> str:
     return blake3.blake3("|".join("" if p is None else str(p) for p in parts).encode()).hexdigest()
 
 
-def result_hash(election_id: str, station_id: str, candidate_id: str, version: int, votes: int) -> str:
-    return digest("RESULT", election_id, station_id, candidate_id, version, votes)
+def result_hash(election_id: str, station_id: str, candidate_id: str, version: int, votes: int, disputed_votes: int = 0) -> str:
+    # Preserve legacy hashes when disputed_votes is zero.
+    parts=("RESULT", election_id, station_id, candidate_id, version, votes)
+    return digest(*(parts + (("DISPUTED", disputed_votes) if disputed_votes else ())))
 
 
 def ensure_runtime_columns(cur) -> None:
@@ -349,15 +351,15 @@ def station_findings(rows:list[dict],position_id:str|None)->list[Finding]:
         cand=r["candidate_votes"]
         ok=turn is not None and cand is not None and cand<=turn
         out.append(Finding("R002",PASSED if ok else FAILED,
-            f"{s} {pid}: candidate votes total {cand if cand is not None else 'missing'} versus this position's turnout {turn if turn is not None else 'missing'}.",
+            f"{s} {pid}: candidate vote totals (including disputed votes assigned to candidates) {cand if cand is not None else 'missing'} versus this position's turnout {turn if turn is not None else 'missing'}.",
             cand,turn,s,None,"POLLING_STATION",s,pid,"Candidate Votes","Position Turnout"))
         ok=turn is not None and valid is not None and rejected is not None and protested is not None and valid+rejected+protested==turn
         accounted=(valid+rejected+protested) if valid is not None and rejected is not None and protested is not None else None
         if ok:
-            msg=f"{s} {pid}: valid {valid} + rejected {rejected} + protested {protested} = turnout {turn}; spoilt ballots recorded separately: {spoilt if spoilt is not None else 'not reported in this source'}."
+            msg=f"{s} {pid}: candidate totals (including assigned disputed votes) {valid} + rejected {rejected} + unresolved protested {protested} = turnout {turn}; spoilt ballots recorded separately: {spoilt if spoilt is not None else 'not reported in this source'}."
         else:
-            msg=f"{s} {pid}: valid {valid} + rejected {rejected} + protested {protested} = {accounted if accounted is not None else 'unknown'}; position turnout = {turn if turn is not None else 'missing'}; spoilt ballots are not added to turnout ({spoilt if spoilt is not None else 'not reported'})."
-        out.append(Finding("R003",PASSED if ok else FAILED,msg,accounted,turn,s,None,"POLLING_STATION",s,pid,"Valid + Rejected + Protested","Position Turnout"))
+            msg=f"{s} {pid}: candidate totals (including assigned disputed votes) {valid} + rejected {rejected} + unresolved protested {protested} = {accounted if accounted is not None else 'unknown'}; position turnout = {turn if turn is not None else 'missing'}; spoilt ballots are not added to turnout ({spoilt if spoilt is not None else 'not reported'})."
+        out.append(Finding("R003",PASSED if ok else FAILED,msg,accounted,turn,s,None,"POLLING_STATION",s,pid,"Candidate Totals + Rejected + Unresolved Protested","Position Turnout"))
         out.append(Finding("R004",PASSED if ok else FAILED,
             f"{s} {pid}: candidate votes total {cand if cand is not None else 'missing'} versus valid votes {valid if valid is not None else 'missing'}.",
             cand,valid,s,None,"POLLING_STATION",s,pid,"Candidate Votes","Valid Votes"))
@@ -389,7 +391,7 @@ def add_latest_result_times(cur,election_id:str,rows:list[dict])->None:
 
 def integrity_findings(cur,election_id:str,station_ids:set[str],position_id:str|None,candidate_id:str|None)->list[Finding]:
     rows=cur.execute("""
-        SELECT result_submission_id,polling_station_id,candidate_id,position_id,result_version,votes,submission_hash
+        SELECT result_submission_id,polling_station_id,candidate_id,position_id,result_version,votes,disputed_votes,submission_hash
         FROM result_submissions WHERE election_id=%s ORDER BY result_submission_id
     """,(election_id,)).fetchall()
     out=[]
@@ -397,7 +399,7 @@ def integrity_findings(cur,election_id:str,station_ids:set[str],position_id:str|
         if r["polling_station_id"] not in station_ids:continue
         if position_id and r["position_id"]!=position_id:continue
         if candidate_id and r["candidate_id"]!=candidate_id:continue
-        expected=result_hash(election_id,r["polling_station_id"],r["candidate_id"],r["result_version"],r["votes"])
+        expected=result_hash(election_id,r["polling_station_id"],r["candidate_id"],r["result_version"],r["votes"],r["disputed_votes"])
         ok=r["submission_hash"]==expected
         out.append(Finding("R010",PASSED if ok else FAILED,
             f"{r['polling_station_id']} {r['position_id']} submission {r['result_submission_id']} hash is {'valid' if ok else 'invalid or missing'}.",
