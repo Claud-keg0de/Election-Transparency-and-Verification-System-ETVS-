@@ -29,25 +29,26 @@ audit_engine.py ----> audit_runs / audit_findings
 verification tools        public reporting (planned)
 ```
 
-The existing form-driven source-entry workflow has four areas:
+The local form-driven source-entry workflow includes the following input forms:
 
 1. Polling-station details, including the election, geography, station code, registered-voter reference and ETVS reporting interval.
-2. Station-wide turnout observations.
+2. Independent, versioned turnout observations for each polling-station/electoral-position pair (President, Governor, Senator, Woman Representative, MP and MCA).
 3. Candidate results for a selected electoral position/contest.
-4. Contest-specific ballot accounting, including valid, rejected and spoilt ballot counts.
+4. Contest-specific candidate results for the selected position.
+5. Contest-specific ballot accounting, including valid, rejected and spoilt ballot counts.
 
-The core accounting contract in the current source-entry workflow is:
+The structured results/accounting contract for each selected station and electoral position is:
 
 - `valid_votes = SUM(candidate votes)` for the contest.
 - `voters_turnout = valid_votes + rejected_votes`.
 - Spoilt ballots are stored separately and do not count as votes cast.
-- Station-wide turnout is shared by the station's contests; it is not entered once per contest.
+- Turnout is entered independently for each station/position stream; ETVS never copies the President's figure into another contest.
 
-This is the **current application contract**, not a claim that every official election form contains all of these fields. In particular, Form 34A has its own printed counts and disputed-vote decision section, which must be mapped explicitly when official-document ingestion is implemented.
+This is the **current application contract**, not a claim that every official election form contains all of these fields. Form 34A has its own printed counts and disputed-vote decision section, captured by the dedicated Form 34A evidence form and stored separately from normalized contest inputs.
 
-## Important distinction: source entry versus Form 34A import
+## Form 34A source capture versus nationwide import
 
-The existing application supports form-driven entry into PostgreSQL. Importing published Form 34A documents at nationwide scale is a separate workflow.
+The local application supports Form 34A PDF/image upload and manual transcription/review at `/form34a`. Nationwide retrieval, OCR/automatic extraction, and ingestion of the corresponding official forms for the other five positions are separate future workflows.
 
 The current schema already provides reusable building blocks:
 
@@ -57,7 +58,7 @@ The current schema already provides reusable building blocks:
 - `published_aggregate_totals` and `source_comparisons` for published totals and cross-source comparisons;
 - `audit_runs` and `audit_findings` for reproducible audit output, including hash-chained findings.
 
-Dedicated Form 34A extraction/review tables, an official-PDF ingestion interface, individual disputed-vote decision ingestion, and a PostGIS-backed map are **design targets documented in** [the Form 34A evidence and reconciliation guide](docs/form34a-evidence-and-reconciliation.md); they must not be assumed to exist in the current schema or UI.
+Form 34A extraction/review tables, manual source upload/transcription, and individual disputed-vote decision capture are implemented in the current schema/UI. Nationwide automated PDF extraction, automatic mapping into normalized contest observations, and a PostGIS-backed map remain future work; see [the Form 34A evidence and reconciliation guide](docs/form34a-evidence-and-reconciliation.md).
 
 ## Architecture and data integrity principles
 
