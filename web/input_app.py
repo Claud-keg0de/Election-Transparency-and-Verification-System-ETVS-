@@ -43,10 +43,11 @@ def db():
                            password=os.getenv("ETVS_DB_PASSWORD",""),row_factory=dict_row)
 def now(): return datetime.now(timezone.utc)
 def hash_input(*parts): return blake3.blake3("|".join("" if p is None else str(p) for p in parts).encode()).hexdigest()
-def result_submission_hash(election_id, station_id, candidate_id, version, votes):
+def result_submission_hash(election_id, station_id, candidate_id, version, votes, disputed_votes=0):
     # Must remain identical to audit_engine.result_hash() so R010 can verify
-    # every result submitted through the form.
-    return hash_input("RESULT", election_id, station_id, candidate_id, version, votes)
+    # every result submitted through the form. Zero preserves legacy hashes.
+    parts=("RESULT", election_id, station_id, candidate_id, version, votes)
+    return hash_input(*(parts + (("DISPUTED", disputed_votes) if disputed_votes else ())))
 def nonneg(name,value):
     if value is None or value.strip()=="": raise ValueError(f"{name} is required.")
     n=int(value)
@@ -192,19 +193,19 @@ def contest():
                 protested=nonneg("Protested votes",request.form.get("protested_votes"))
                 spoilt=nonneg("Spoilt ballots",request.form.get("spoilt_ballots"))
                 if not candidates: raise ValueError("No candidate reference rows are configured for this election and position.")
-                votes={x["candidate_id"]:nonneg(x["candidate_name"]+" valid votes",request.form.get("vote_"+x["candidate_id"])) for x in candidates}
+                votes={x["candidate_id"]:nonneg(x["candidate_name"]+" total votes (including assigned disputed votes)",request.form.get("vote_"+x["candidate_id"])) for x in candidates}
                 disputed={x["candidate_id"]:nonneg(x["candidate_name"]+" disputed votes",request.form.get("disputed_"+x["candidate_id"])) for x in candidates}
                 valid=sum(votes.values())
-                if sum(disputed.values()) > protested:
-                    raise ValueError("Candidate-assigned disputed votes cannot exceed the total protested votes.")
+                if any(disputed[cid] > votes[cid] for cid in votes):
+                    raise ValueError("A candidate’s assigned disputed votes cannot exceed that candidate’s total votes.")
                 if valid+rejected+protested != turnout_value:
-                    raise ValueError(f"{pid} turnout {turnout_value} must equal valid votes {valid} + rejected ballots {rejected} + protested votes {protested}. Spoilt ballots are tracked separately and excluded from turnout.")
+                    raise ValueError(f"{pid} turnout {turnout_value} must equal candidate votes (including assigned disputed votes) {valid} + rejected ballots {rejected} + unresolved protested votes {protested}. Spoilt ballots are tracked separately and excluded from turnout.")
                 eid=q.execute("SELECT election_id FROM polling_stations WHERE polling_station_id=%s",(sid,)).fetchone()["election_id"]; t=now()
                 for cid,vote in votes.items():
                     rv=q.execute("""SELECT COALESCE(MAX(result_version),0)+1 AS v FROM result_submissions
                                     WHERE election_id=%s AND polling_station_id=%s AND candidate_id=%s""",(eid,sid,cid)).fetchone()["v"]
                     disputed_vote=disputed[cid]
-                    rh=result_submission_hash(eid,sid,cid,rv,vote)
+                    rh=result_submission_hash(eid,sid,cid,rv,vote,disputed_vote)
                     q.execute("""INSERT INTO result_submissions(election_id,polling_station_id,candidate_id,result_version,votes,disputed_votes,position_id,
                                  submission_hash,submitted_at,observed_at) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
                               (eid,sid,cid,rv,vote,disputed_vote,pid,rh,t,t))
@@ -215,7 +216,7 @@ def contest():
                              valid_votes,rejected_votes,protested_votes,spoilt_ballots,turnout_observation_id,observed_at,input_hash)
                              VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
                           (eid,sid,pid,bv,valid,rejected,protested,spoilt,turnout_observation_id,t,bh))
-                c.commit(); message=f"{pid}: {valid} valid + {rejected} rejected + {protested} protested = turnout {turnout_value}; {spoilt} spoilt ballots tracked separately."
+                c.commit(); message=f"{pid}: {valid} candidate votes (including assigned disputed votes) + {rejected} rejected + {protested} unresolved protested = turnout {turnout_value}; {spoilt} spoilt ballots tracked separately."
             except Exception as exc: c.rollback(); error=True; message=str(exc)
     body=render_template_string("""<section><h2>Contest results + ballot accounting</h2>
     <p class="small"><strong>Turnout is position-specific.</strong> Record turnout separately for the President, Governor, Senator, Woman Representative, MP and MCA. The selected position's turnout is used for its ballot-accounting reconciliation; values are never shared across positions.</p>
@@ -225,11 +226,11 @@ def contest():
     {% if sid and pid %}{% if turnout_value is none %}<div class="notice error">No turnout has been recorded for this station and position. <a href="/turnout?polling_station_id={{sid}}&position_id={{pid}}">Record its turnout first</a>.</div>{% else %}
     <div class="notice">Turnout for {{pid}}: <strong>{{turnout_value}}</strong></div>
     <form method="post"><input type="hidden" name="polling_station_id" value="{{sid}}"><input type="hidden" name="position_id" value="{{pid}}">
-    <h3>Candidate votes</h3><table><tr><th>Candidate</th><th>Valid votes</th><th>Disputed votes assigned to candidate</th></tr>
+    <h3>Candidate votes</h3><table><tr><th>Candidate</th><th>Total candidate votes (including assigned disputed votes)</th><th>Disputed votes included in candidate total</th></tr>
     {% for x in candidates %}<tr><td>{{x.candidate_name}}</td><td><input name="vote_{{x.candidate_id}}" type="number" min="0" value="0" required></td><td><input name="disputed_{{x.candidate_id}}" type="number" min="0" value="0" required></td></tr>{% endfor %}</table>
     <div class="grid"><div><label>Rejected ballots</label><input name="rejected_votes" type="number" min="0" value="0" required></div>
-    <div><label>Protested votes (excluded from valid votes)</label><input name="protested_votes" type="number" min="0" value="0" required></div><div><label>Spoilt ballots (not cast)</label><input name="spoilt_ballots" type="number" min="0" value="0" required></div></div>
-    <p class="notice">ETVS stores candidate valid votes and candidate-assigned disputed votes separately. Protested votes are excluded from valid votes; turnout must equal <strong>valid + rejected + protested</strong>. Spoilt ballots are not added to turnout.</p>
+    <div><label>Unresolved protested votes (not yet assigned to a candidate)</label><input name="protested_votes" type="number" min="0" value="0" required></div><div><label>Spoilt ballots (not cast)</label><input name="spoilt_ballots" type="number" min="0" value="0" required></div></div>
+    <p class="notice">Candidate totals include disputed votes assigned to them; the disputed field records a subset of that candidate total and is not added again. Only unresolved protested votes remain outside candidate totals. Turnout must equal <strong>candidate totals (including assigned disputed votes) + rejected + unresolved protested</strong>. Spoilt ballots are not added to turnout.</p>
     <button type="submit">Save contest results + accounting</button></form>{% endif %}{% endif %}</section>""",
         stations=stations,positions=positions,sid=sid,pid=pid,candidates=candidates,turnout_value=turnout_value)
     return render(body,message,error)
