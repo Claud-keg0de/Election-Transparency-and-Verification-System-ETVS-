@@ -423,7 +423,7 @@ CREATE TABLE result_submissions (
     candidate_id TEXT NOT NULL,
     result_version INTEGER NOT NULL DEFAULT 1 CHECK(result_version>0),
     votes INTEGER NOT NULL CHECK(votes>=0),
-    disputed_votes INTEGER NOT NULL DEFAULT 0 CHECK(disputed_votes>=0),
+    disputed_votes INTEGER NOT NULL DEFAULT 0 CHECK(disputed_votes>=0 AND disputed_votes<=votes),
     position_id TEXT REFERENCES positions(position_id) ON UPDATE CASCADE ON DELETE RESTRICT,
     submission_hash TEXT,
     hash_algorithm TEXT NOT NULL DEFAULT 'BLAKE3-256',
