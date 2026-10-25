@@ -1,8 +1,8 @@
 """Seed deterministic ETVS PostgreSQL test data.
 
-The seed deliberately models the election as six separate contests while keeping
-ONE turnout figure per polling station. Every contest's ballot accounting points
-back to that same station turnout observation, so voters are never double-counted.
+The seed models six separate contest-turnout streams per polling station.
+Each ballot-accounting record references the latest turnout observation for its
+own position, so the audit never conflates different ballot streams.
 
 Controlled anomalies prove the audit rules:
 - PS003 turnout is greater than registered voters (R001).
@@ -337,6 +337,26 @@ def reset_sample(cur) -> None:
     clears the complete derived audit history before rebuilding the sample.
     This function is intended for the controlled development/test database.
     """
+    # Protect uploaded Form 34A evidence: this reset is only for a controlled
+    # sample database. Refuse to delete non-seed source evidence for the sample
+    # election rather than silently destroying a user's uploaded documents.
+    try:
+        external_forms = cur.execute("""
+            SELECT COUNT(*) AS n
+            FROM form34a_observations f
+            JOIN source_documents d ON d.document_id=f.source_document_id
+            WHERE f.election_id=%s
+              AND d.source_id NOT IN (%s,%s,%s)
+        """,(ELECTION_ID,SOURCE_ID,PUBLISHED_SOURCE_ID,BALLOT_SPEC_SOURCE_ID)).fetchone()["n"]
+        if external_forms:
+            raise ValueError(
+                f"Refusing --reset: {external_forms} non-seed Form 34A observation(s) exist for {ELECTION_ID}. "
+                "Use a disposable test database or remove the records explicitly after backing them up."
+            )
+    except psycopg.errors.UndefinedTable:
+        # A pre-migration development database has no Form 34A evidence tables.
+        pass
+
     # The first six deletes clear the global derived audit chain and have no
     # SQL parameters. All remaining deletes are scoped to the controlled sample.
     global_deletes = (
