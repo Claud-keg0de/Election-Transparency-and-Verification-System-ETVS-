@@ -185,7 +185,7 @@ def latest_station_contests(cur, election_id: str, station_ids: set[str]) -> lis
         ), ballot AS (
             SELECT DISTINCT ON(election_id,polling_station_id,position_id)
                    polling_station_id,position_id,ballot_accounting_observation_id,valid_votes,rejected_votes,
-                   spoilt_ballots,turnout_observation_id,observation_version,observed_at
+                   protested_votes,spoilt_ballots,turnout_observation_id,observation_version,observed_at
             FROM ballot_accounting_observations
             WHERE election_id=%s AND position_id IS NOT NULL
             ORDER BY election_id,polling_station_id,position_id,observation_version DESC
@@ -202,7 +202,7 @@ def latest_station_contests(cur, election_id: str, station_ids: set[str]) -> lis
         SELECT ps.polling_station_id,ps.polling_station_code,
                COALESCE(r.registered_voters,ps.registered_voters) registered_voters,
                r.observed_at registered_at,t.turnout_observation_id,t.voters_turnout,t.observed_at turnout_at,
-               b.position_id,b.valid_votes,b.rejected_votes,b.spoilt_ballots,b.turnout_observation_id ballot_turnout_id,
+               b.position_id,b.valid_votes,b.rejected_votes,b.protested_votes,b.spoilt_ballots,b.turnout_observation_id ballot_turnout_id,
                b.observed_at ballot_at,tot.candidate_votes,tot.candidate_count
         FROM polling_stations ps
         LEFT JOIN registered r ON r.polling_station_id=ps.polling_station_id
@@ -343,20 +343,19 @@ def station_findings(rows:list[dict],position_id:str|None)->list[Finding]:
         pid=r["position_id"]
         if not pid or (position_id and pid!=position_id): continue
         s=r["polling_station_id"]; turn=r["voters_turnout"]
-        valid,rejected,spoilt=r["valid_votes"],r["rejected_votes"],r["spoilt_ballots"]
+        valid,rejected,protested,spoilt=r["valid_votes"],r["rejected_votes"],r["protested_votes"],r["spoilt_ballots"]
         cand=r["candidate_votes"]
         ok=turn is not None and cand is not None and cand<=turn
         out.append(Finding("R002",PASSED if ok else FAILED,
             f"{s} {pid}: candidate votes total {cand if cand is not None else 'missing'} versus this position's turnout {turn if turn is not None else 'missing'}.",
             cand,turn,s,None,"POLLING_STATION",s,pid,"Candidate Votes","Position Turnout"))
-        ok=turn is not None and valid is not None and rejected is not None and valid+rejected==turn
-        accounted=(valid+rejected) if valid is not None and rejected is not None else None
+        ok=turn is not None and valid is not None and rejected is not None and protested is not None and valid+rejected+protested==turn
+        accounted=(valid+rejected+protested) if valid is not None and rejected is not None and protested is not None else None
         if ok:
-            msg=f"{s} {pid}: valid {valid} + rejected {rejected} = turnout {turn}; spoilt ballots recorded separately: {spoilt if spoilt is not None else 'not reported in this source'}."
+            msg=f"{s} {pid}: valid {valid} + rejected {rejected} + protested {protested} = turnout {turn}; spoilt ballots recorded separately: {spoilt if spoilt is not None else 'not reported in this source'}."
         else:
-            msg=f"{s} {pid}: valid {valid} + rejected {rejected} = {accounted if accounted is not None else 'unknown'}; position turnout = {turn if turn is not None else 'missing'}; spoilt ballots are not added to turnout ({spoilt if spoilt is not None else 'not reported'})."
-        out.append(Finding("R003",PASSED if ok else FAILED,msg,accounted,turn,s,None,"POLLING_STATION",s,pid,"Valid + Rejected","Position Turnout"))
-        ok=cand is not None and valid is not None and cand==valid
+            msg=f"{s} {pid}: valid {valid} + rejected {rejected} + protested {protested} = {accounted if accounted is not None else 'unknown'}; position turnout = {turn if turn is not None else 'missing'}; spoilt ballots are not added to turnout ({spoilt if spoilt is not None else 'not reported'})."
+        out.append(Finding("R003",PASSED if ok else FAILED,msg,accounted,turn,s,None,"POLLING_STATION",s,pid,"Valid + Rejected + Protested","Position Turnout"))
         out.append(Finding("R004",PASSED if ok else FAILED,
             f"{s} {pid}: candidate votes total {cand if cand is not None else 'missing'} versus valid votes {valid if valid is not None else 'missing'}.",
             cand,valid,s,None,"POLLING_STATION",s,pid,"Candidate Votes","Valid Votes"))
