@@ -78,6 +78,7 @@ def index():
                                 JOIN counties co ON co.county_id=c.county_id
                                ORDER BY co.county_name,c.constituency_name,w.ward_name,ps.polling_station_code""").fetchall()
     body=render_template_string("""<p class="notice"><strong>Human source entry is form-driven.</strong> seed.py is not required for normal data entry.</p>
+    <section><h2>Source-entry workflow</h2><p><a href="/form34a">Upload and transcribe Form 34A</a> · <a href="/turnout">Record turnout for each position</a> · <a href="/contest">Enter contest results and ballot accounting</a></p><p class="small">Form evidence and normalized observations are stored separately. Turnout values are entered independently for all six electoral positions.</p></section>
     <section><h2>Polling stations</h2><table><tr><th>Station</th><th>Election</th><th>County</th><th>Constituency</th><th>Ward</th><th>Registered</th></tr>
     {% for s in stations %}<tr><td>{{s.polling_station_code}} ({{s.polling_station_id}})</td><td>{{s.election_name}}</td><td>{{s.county_name}}</td><td>{{s.constituency_name}}</td><td>{{s.ward_name}}</td><td>{{s.registered_voters}}</td></tr>{% endfor %}</table></section>""",stations=stations)
     return render(body)
@@ -411,28 +412,31 @@ def contest():
     with db() as c,c.cursor() as q:
         stations=q.execute("SELECT polling_station_id,polling_station_code,election_id,registered_voters FROM polling_stations ORDER BY polling_station_code").fetchall()
         positions=q.execute("""SELECT position_id,position_name FROM positions WHERE position_id=ANY(%s)
-                               ORDER BY position_name""",(list(POSITIONS),)).fetchall()
+                               ORDER BY observation_sequence NULLS LAST,position_id""",(list(POSITIONS),)).fetchall()
         sid=request.values.get("polling_station_id"); pid=request.values.get("position_id")
-        candidates=[]; turnout_value=None
+        candidates=[]; turnout_value=None; turnout_observation_id=None
         if sid:
             st=q.execute("SELECT election_id FROM polling_stations WHERE polling_station_id=%s",(sid,)).fetchone()
-            if st:
-                t=q.execute("""SELECT voters_turnout FROM turnout_observations WHERE election_id=%s AND polling_station_id=%s
-                               ORDER BY observation_version DESC LIMIT 1""",(st["election_id"],sid)).fetchone()
+            if st and pid in POSITIONS:
+                t=q.execute("""SELECT turnout_observation_id,voters_turnout FROM turnout_observations
+                               WHERE election_id=%s AND polling_station_id=%s AND position_id=%s
+                               ORDER BY observation_version DESC LIMIT 1""",(st["election_id"],sid,pid)).fetchone()
                 turnout_value=t["voters_turnout"] if t else None
-                if pid:
-                    candidates=q.execute("""SELECT candidate_id,candidate_name FROM candidates WHERE election_id=%s AND position_id=%s
-                                            ORDER BY candidate_name""",(st["election_id"],pid)).fetchall()
+                turnout_observation_id=t["turnout_observation_id"] if t else None
+                candidates=q.execute("""SELECT candidate_id,candidate_name FROM candidates WHERE election_id=%s AND position_id=%s
+                                        ORDER BY candidate_name""",(st["election_id"],pid)).fetchall()
         if request.method=="POST":
             try:
-                if turnout_value is None: raise ValueError("Enter station turnout before contest accounting.")
-                if not pid: raise ValueError("Select a contest.")
+                if not sid or not pid or pid not in POSITIONS: raise ValueError("Select a polling station and electoral position.")
+                if turnout_value is None or turnout_observation_id is None:
+                    raise ValueError("Record a turnout observation for this station and position before entering its contest accounting.")
                 rejected=nonneg("Rejected ballots",request.form.get("rejected_votes"))
                 spoilt=nonneg("Spoilt ballots",request.form.get("spoilt_ballots"))
+                if not candidates: raise ValueError("No candidate reference rows are configured for this election and position.")
                 votes={x["candidate_id"]:nonneg(x["candidate_name"],request.form.get("vote_"+x["candidate_id"])) for x in candidates}
                 valid=sum(votes.values())
                 if valid+rejected != turnout_value:
-                    raise ValueError(f"Turnout {turnout_value} must equal valid votes {valid} + rejected ballots {rejected}. Spoilt ballots are excluded because they were not cast.")
+                    raise ValueError(f"{pid} turnout {turnout_value} must equal valid votes {valid} + rejected ballots {rejected}. Spoilt ballots are tracked separately and excluded from turnout.")
                 eid=q.execute("SELECT election_id FROM polling_stations WHERE polling_station_id=%s",(sid,)).fetchone()["election_id"]; t=now()
                 for cid,vote in votes.items():
                     rv=q.execute("""SELECT COALESCE(MAX(result_version),0)+1 AS v FROM result_submissions
@@ -443,30 +447,30 @@ def contest():
                               (eid,sid,cid,rv,vote,pid,rh,t,t))
                 bv=q.execute("""SELECT COALESCE(MAX(observation_version),0)+1 AS v FROM ballot_accounting_observations
                                WHERE election_id=%s AND polling_station_id=%s AND position_id=%s""",(eid,sid,pid)).fetchone()["v"]
-                bh=hash_input("BALLOT_ACCOUNTING",eid,sid,pid,bv,valid,rejected,spoilt,turnout_value,t.isoformat())
-                tid=q.execute("""SELECT turnout_observation_id FROM turnout_observations WHERE election_id=%s AND polling_station_id=%s
-                                 ORDER BY observation_version DESC LIMIT 1""",(eid,sid)).fetchone()["turnout_observation_id"]
+                bh=hash_input("BALLOT_ACCOUNTING",eid,sid,pid,bv,valid,rejected,spoilt,turnout_observation_id,t.isoformat())
                 q.execute("""INSERT INTO ballot_accounting_observations(election_id,polling_station_id,position_id,observation_version,
                              valid_votes,rejected_votes,spoilt_ballots,turnout_observation_id,observed_at,input_hash)
-                             VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",(eid,sid,pid,bv,valid,rejected,spoilt,tid,t,bh))
-                c.commit(); message=f"{pid}: {valid} valid + {rejected} rejected = {turnout_value} turnout; {spoilt} spoilt tracked separately."
+                             VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                          (eid,sid,pid,bv,valid,rejected,spoilt,turnout_observation_id,t,bh))
+                c.commit(); message=f"{pid}: {valid} valid + {rejected} rejected = turnout {turnout_value}; {spoilt} spoilt ballots tracked separately."
             except Exception as exc: c.rollback(); error=True; message=str(exc)
     body=render_template_string("""<section><h2>Contest results + ballot accounting</h2>
-    <p class="small"><strong>Turnout is station-wide.</strong> Valid votes are derived from candidate entries for this contest. Spoilt ballots are separate and never counted as cast.</p>
+    <p class="small"><strong>Turnout is position-specific.</strong> Record turnout separately for the President, Governor, Senator, Woman Representative, MP and MCA. The selected position's turnout is used for its ballot-accounting reconciliation; values are never shared across positions.</p>
     <form method="get"><div class="grid"><div><label>Polling station</label><select name="polling_station_id" onchange="this.form.submit()"><option value="">Select</option>
     {% for s in stations %}<option value="{{s.polling_station_id}}" {% if s.polling_station_id==sid %}selected{% endif %}>{{s.polling_station_code}} — {{s.polling_station_id}}</option>{% endfor %}</select></div>
-    <div><label>Contest</label><select name="position_id" onchange="this.form.submit()"><option value="">Select</option>{% for p in positions %}<option value="{{p.position_id}}" {% if p.position_id==pid %}selected{% endif %}>{{p.position_name}}</option>{% endfor %}</select></div></div></form>
-    {% if sid and pid %}{% if turnout_value is none %}<div class="notice error">Enter turnout for this station first.</div>{% else %}
-    <div class="notice">Turnout / voters cast: <strong>{{turnout_value}}</strong></div>
+    <div><label>Electoral position</label><select name="position_id" onchange="this.form.submit()"><option value="">Select</option>{% for p in positions %}<option value="{{p.position_id}}" {% if p.position_id==pid %}selected{% endif %}>{{p.position_name}}</option>{% endfor %}</select></div></div></form>
+    {% if sid and pid %}{% if turnout_value is none %}<div class="notice error">No turnout has been recorded for this station and position. <a href="/turnout?polling_station_id={{sid}}&position_id={{pid}}">Record its turnout first</a>.</div>{% else %}
+    <div class="notice">Turnout for {{pid}}: <strong>{{turnout_value}}</strong></div>
     <form method="post"><input type="hidden" name="polling_station_id" value="{{sid}}"><input type="hidden" name="position_id" value="{{pid}}">
     <h3>Candidate votes</h3><table><tr><th>Candidate</th><th>Votes</th></tr>
     {% for x in candidates %}<tr><td>{{x.candidate_name}}</td><td><input name="vote_{{x.candidate_id}}" type="number" min="0" value="0" required></td></tr>{% endfor %}</table>
     <div class="grid"><div><label>Rejected ballots</label><input name="rejected_votes" type="number" min="0" value="0" required></div>
     <div><label>Spoilt ballots (not cast)</label><input name="spoilt_ballots" type="number" min="0" value="0" required></div></div>
-    <p class="notice">ETVS calculates <strong>valid votes = total candidate votes</strong> and requires <strong>turnout = valid + rejected</strong>.</p>
+    <p class="notice">ETVS calculates <strong>valid votes = total candidate votes</strong> and requires <strong>selected-position turnout = valid + rejected</strong>. Spoilt ballots are not added to turnout.</p>
     <button type="submit">Save contest results + accounting</button></form>{% endif %}{% endif %}</section>""",
         stations=stations,positions=positions,sid=sid,pid=pid,candidates=candidates,turnout_value=turnout_value)
     return render(body,message,error)
+
 
 if __name__=="__main__":
     app.run(host=os.getenv("ETVS_WEB_HOST","127.0.0.1"),port=int(os.getenv("ETVS_WEB_PORT","5000")),debug=False)
