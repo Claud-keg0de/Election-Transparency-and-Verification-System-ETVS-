@@ -489,6 +489,9 @@ CREATE TABLE form34a_observations (
         CHECK(extraction_method IN ('MANUAL','OCR_ASSISTED','OCR','OTHER')),
     review_status TEXT NOT NULL DEFAULT 'UNREVIEWED'
         CHECK(review_status IN ('UNREVIEWED','IN_REVIEW','REVIEWED','NEEDS_CORRECTION','CONFLICTING_COPY')),
+    reviewed_by TEXT,
+    reviewed_at TIMESTAMPTZ,
+    review_notes TEXT,
     source_page INTEGER CHECK(source_page IS NULL OR source_page > 0),
     source_reference TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -497,6 +500,9 @@ CREATE TABLE form34a_observations (
         REFERENCES polling_stations(polling_station_id,election_id)
         ON UPDATE CASCADE ON DELETE RESTRICT,
     CONSTRAINT uq_form34a_station_version UNIQUE(election_id,polling_station_id,observation_version),
+    CONSTRAINT form34a_review_metadata_check CHECK(
+        (review_status='REVIEWED' AND reviewed_by IS NOT NULL AND length(trim(reviewed_by))>0 AND reviewed_at IS NOT NULL)
+        OR (review_status<>'REVIEWED' AND reviewed_at IS NULL)),
     CONSTRAINT uq_form34a_observation_election UNIQUE(form34a_observation_id,election_id),
     CONSTRAINT form34a_registered_capture CHECK(
         (registered_voters_status='PRESENT' AND registered_voters_reported IS NOT NULL) OR
@@ -570,6 +576,25 @@ CREATE TABLE form34a_disputed_vote_decisions (
         (serial_capture_status<>'PRESENT' AND ballot_serial_number IS NULL))
 );
 
+
+CREATE TABLE form34a_review_events (
+    form34a_review_event_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    form34a_observation_id BIGINT NOT NULL,
+    election_id TEXT NOT NULL REFERENCES elections(election_id) ON UPDATE CASCADE ON DELETE RESTRICT,
+    previous_review_status TEXT NOT NULL
+        CHECK(previous_review_status IN ('UNREVIEWED','IN_REVIEW','REVIEWED','NEEDS_CORRECTION','CONFLICTING_COPY')),
+    new_review_status TEXT NOT NULL CHECK(new_review_status='REVIEWED'),
+    reviewer_name TEXT NOT NULL CHECK(length(trim(reviewer_name))>0),
+    review_notes TEXT,
+    reviewed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT fk_form34a_review_event_observation
+        FOREIGN KEY(form34a_observation_id,election_id)
+        REFERENCES form34a_observations(form34a_observation_id,election_id)
+        ON UPDATE CASCADE ON DELETE RESTRICT
+);
+
+CREATE INDEX idx_form34a_review_events_observation
+    ON form34a_review_events(form34a_observation_id,reviewed_at DESC);
 
 -- ---------------------------------------------------------------------------
 -- Audit output
